@@ -32,6 +32,7 @@ class Commons:
     def load_wechatEx_configs(self):
         path = self.wechatutils_instance.get_configs_path()
         pid, version = self.wechatutils_instance.get_wechat_pid_and_version_mac()
+        print(pid, version)
         if pid or version is not None:
             wehcatEx_hookcode = open(path + "../scripts/hook.js", "r", encoding="utf-8").read()
             wechatEx_addresses = open(path + "../configs/address_{}_arm.json".format(version)).read()

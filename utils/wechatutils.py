@@ -74,13 +74,24 @@ class WechatUtils:
 
     def get_wechat_pid_and_version_mac(self):
         try:
-            pid_command="ps aux | grep 'WeChatAppEx' |  grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | awk '{print $2}' | tail -n 1"
-            version_command = "ps aux | grep 'WeChatAppEx' |  grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | grep -oE 'MacWechat/([0-9]+\.)+[0-9]+\(0x\d+\)' |  grep -oE '(0x\d+)' | sed 's/0x//g' | head -n 1"
-            pid  = subprocess.run(pid_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.replace("\n","")
-            version  = subprocess.run(version_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.replace("\n","")
-            return int(pid),version
+            pid_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | awk '{print $2}' | tail -n 1"
+            version_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | grep -oE 'MacWechat/([0-9]+\.)+[0-9]+\(0x\d+\)' | grep -oE '(0x\d+)' | sed 's/0x//g' | head -n 1"
+            
+            pid_result = subprocess.run(pid_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            version_result = subprocess.run(version_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            pid = pid_result.stdout.strip()
+            version = version_result.stdout.strip()
+            
+            if not pid or not version:
+                print(Color.RED + "[-] 未找到有效的微信进程或版本信息" + Color.END)
+                return None, None
+            
+            return int(pid), version
+        
         except subprocess.CalledProcessError as e:
-            return e.stderr
+            print(Color.RED + f"[-] 执行命令时出错：{e.stderr}" + Color.END)
+            return None, None
 
     def get_wechat_version_mac(self):
         try:

@@ -23,7 +23,7 @@ class WechatUtils:
     def get_version_list(self):
         configs_path = self.configs_path
         version_list = os.listdir(configs_path)
-        versions_list = [int(file.split('_')[1]) for file in version_list if file.startswith('address_')]
+        versions_list = [file.split('_')[1] for file in version_list if file.startswith('address_')]
         return versions_list
 
     def is_wechatEx_process(self, cmdline):
@@ -75,14 +75,14 @@ class WechatUtils:
     def get_wechat_pid_and_version_mac(self):
         try:
             pid_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | awk '{print $2}' | tail -n 1"
-            version_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | grep -oE 'MacWechat/([0-9]+\.)+[0-9]+\(0x\d+\)' | grep -oE '(0x\d+)' | sed 's/0x//g' | head -n 1"
+            version_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | grep -oE 'MacWechat/(\d+(\.\d+)+)\(0x[a-fA-F0-9]+\)' | grep -oE '(0x[a-fA-F0-9]+)' | sed 's/0x//g' | head -n 1"
             
             pid_result = subprocess.run(pid_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             version_result = subprocess.run(version_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
             pid = pid_result.stdout.strip()
             version = version_result.stdout.strip()
-            
+
             if not pid or not version:
                 print(Color.RED + "[-] 未找到有效的微信进程或版本信息" + Color.END)
                 return None, None

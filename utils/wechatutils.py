@@ -74,14 +74,19 @@ class WechatUtils:
 
     def get_wechat_pid_and_version_mac(self):
         try:
-            pid_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | awk '{print $2}' | tail -n 1"
-            version_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | grep -oE 'MacWechat/(\d+(\.\d+)+)\(0x[a-fA-F0-9]+\)' | grep -oE '(0x[a-fA-F0-9]+)' | sed 's/0x//g' | head -n 1"
+            pid_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep 'user-agent=' | awk '{print $2}' | tail -n 1"
+            version_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep 'user-agent=' | grep -oE 'UnifiedPCMacWechat\\(0x[0-9a-fA-F]+\\)' | grep -oE '0x[0-9a-fA-F]+' | sed 's/0x//g' | head -n 1"
+            version_result = subprocess.run(version_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            version = version_result.stdout.strip()
+            if not version:
+                # pre-4.x: fall back to the legacy MacWechat UA identifier
+                version_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep 'user-agent=' | grep -oE 'MacWechat/(\d+(\.\d+)+)\(0x[a-fA-F0-9]+\)' | grep -oE '(0x[a-fA-F0-9]+)' | sed 's/0x//g' | head -n 1"
+                version_result = subprocess.run(version_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                version = version_result.stdout.strip()
             
             pid_result = subprocess.run(pid_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            version_result = subprocess.run(version_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+
             pid = pid_result.stdout.strip()
-            version = version_result.stdout.strip()
 
             if not pid or not version:
                 print(Color.RED + "[-] 未找到有效的微信进程或版本信息" + Color.END)
@@ -95,8 +100,15 @@ class WechatUtils:
 
     def get_wechat_version_mac(self):
         try:
-            version_command = "ps aux | grep 'WeChatAppEx' |  grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | grep -oE 'MacWechat/([0-9]+\.)+[0-9]+\(0x\d+\)' |  grep -oE '(0x\d+)' | sed 's/0x//g' | head -n 1"
-            version  = subprocess.run(version_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.replace("\n","")
+            # WeChat 4.x appends a legacy-compatible UA "MacWechat/3.8.7(0x13080712)"
+            # that never changes; the real per-build identifier is
+            # UnifiedPCMacWechat(0x...) — prefer it when present.
+            version_command = "ps aux | grep 'WeChatAppEx' | grep -v 'grep' | grep ' --client_version' | grep 'user-agent=' | grep -oE 'UnifiedPCMacWechat\(0x[0-9a-fA-F]+\\)' | grep -oE '0x[0-9a-fA-F]+' | sed 's/0x//g' | head -n 1"
+            version = subprocess.run(version_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.replace("\n","")
+            if version:
+                return version
+            legacy_command = "ps aux | grep 'WeChatAppEx' |  grep -v 'grep' | grep ' --client_version' | grep '-user-agent=' | grep -oE 'MacWechat/([0-9]+\.)+[0-9]+\(0x\d+\)' |  grep -oE '(0x\d+)' | sed 's/0x//g' | head -n 1"
+            version = subprocess.run(legacy_command, shell=True, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.replace("\n","")
             return version
         except subprocess.CalledProcessError as e:
             return e.stderr

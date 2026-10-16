@@ -110,6 +110,25 @@ if (!module) {
         }
     });
 
+
+    // ---- 7. rewrite render-type VALUE as the builder writes it.
+    // WeChat appends wmpf-render-type=0 for ordinary renderers; flipping the
+    // value here makes every renderer start as debug type (inspector on).
+    Interceptor.attach(base.add(0x1928DB4), {   // flue AppendSwitch (value form)
+        onEnter: function (args) {
+            try {
+                if (args[1].readCString() !== "wmpf-render-type") return;
+                // value StringPiece: [x3, x4)
+                var len = args[4].toInt32() - args[3].toInt32();
+                if (len === 1 && args[3].readU8() === 0x30) {  // "0"
+                    var v = Memory.allocUtf8String("1");
+                    args[3] = v; args[4] = v.add(1);
+                    send("[sniper] wmpf-render-type value 0 -> 1");
+                }
+            } catch (e) { }
+        }
+    });
+
     recv("swap", function onMessage(msg) {
         swapAppid = msg.appid || null;
         send("[swap] " + (swapAppid ? "TARGET=" + swapAppid : "OFF"));

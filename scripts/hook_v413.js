@@ -128,19 +128,25 @@ function main() {
     // Trace only launch/debug-related keys to diff mini-program launches.
     var TRACE_PATTERN = /^(debug|version|env|scene|launch|app_|pkg|wxpkg|host_)/i;
     var DEBUG_TYPE_VALUE = 1;
+    var FORCE_INTS = { "debugType": 1, "versionType": 1, "envVersion": 1 };
     Interceptor.attach(base.add(0x564DB00), {
         onEnter: function (args) {
-            this.force = false;
+            this.force = 0;
+            this.keyName = null;
             var key = readCStringSafe(args[1]);
-            if (key === "debugType") this.force = true;
+            if (key && FORCE_INTS[key] !== undefined) {
+                this.force = FORCE_INTS[key];
+                this.keyName = key;
+            }
             if (key && TRACE_PATTERN.test(key)) {
                 send("[getint] " + key + " (default=" + args[2].toInt32() + ")");
             }
         },
         onLeave: function (retval) {
             if (this.force) {
-                send("[jsonint] debugType " + retval.toInt32() + " -> " + DEBUG_TYPE_VALUE);
-                retval.replace(ptr(DEBUG_TYPE_VALUE));
+                send("[forceint] " + this.keyName + " " + retval.toInt32()
+                     + " -> " + this.force);
+                retval.replace(ptr(this.force));
             }
         }
     });

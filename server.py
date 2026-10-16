@@ -83,7 +83,7 @@ class Injector:
                 self.messages.append(
                     {"t": time.strftime("%H:%M:%S"), "pid": pid,
                      "msg": payload[:300]})
-                del self.messages[:-200]
+                del self.messages[:-500]
         return handler
 
     def inject(self, pid):
@@ -178,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({
                 "procs": procs,
                 "injected": INJECTOR.injected_pids(),
-                "messages": INJECTOR.messages[-40:],
+                "messages": INJECTOR.messages[-150:],,
             })
         elif self.path == "/api/probe":
             self._json({"cdp": probe_cdp()})

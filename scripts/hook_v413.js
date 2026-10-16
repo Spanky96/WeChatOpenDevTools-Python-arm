@@ -176,6 +176,15 @@ function main() {
                     send("[endpoint] " + (old || "<empty>") + " -> " + LOCAL_DEBUG_ENDPOINT);
                     return;
                 }
+                if (key === "versionType" && tag === 2) {
+                    // rewrite at the source: every renderer gets dev-mode
+                    var cur = args[3].readU32();
+                    if (cur !== 1) {
+                        args[3].writeU32(1);
+                        send("[versionsw] versionType " + cur + " -> 1 (dev mode)");
+                    }
+                    return;
+                }
                 if (!TRACE_PATTERN.test(key)) return;
                 if (tag === 2) val = " int=" + args[3].readU32();
                 else if (tag === 1) val = " bool=" + (args[3].readU8() & 1);

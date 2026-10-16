@@ -179,7 +179,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({
                 "procs": procs,
                 "injected": INJECTOR.injected_pids(),
-                "messages": INJECTOR.messages[-150:],,
+                "messages": INJECTOR.messages[-150:]
             })
         elif self.path == "/api/probe":
             self._json({"cdp": probe_cdp()})
@@ -231,7 +231,8 @@ def auto_inject_loop():
                 if pid not in first_seen:
                     first_seen[pid] = now
                     continue
-                if now - first_seen[pid] < SETTLE_SECONDS:
+                settle = 0 if p["kind"] == "main" else SETTLE_SECONDS
+                if now - first_seen[pid] < settle:
                     continue
                 if p["kind"] in ("main", "miniapp", "preload", "prewarm"):
                     INJECTOR.inject(pid)

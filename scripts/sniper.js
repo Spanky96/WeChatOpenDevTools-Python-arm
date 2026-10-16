@@ -75,6 +75,9 @@ if (!module) {
         ['pointer', 'pointer', 'uint64', 'pointer', 'pointer']);
     var INSPECT_SWITCHES = ["xweb-enable-inspect", "enable-vconsole",
                              "auto-launch-devtools"];
+    // render-type=1 registers the renderer with the debug bridge; appending
+    // the same switch key overwrites WeChat's default 0 (Chromium switch map)
+    var RENDER_TYPE_OVERRIDE = "1";
     Interceptor.attach(base.add(0x525721C), {
         onEnter: function (args) { this.builder = args[1]; },
         onLeave: function (retval) {
@@ -84,7 +87,11 @@ if (!module) {
                     var buf = Memory.allocUtf8String(s);
                     appendSwitchFlue(this.builder, buf, uint64(s.length), ptr(0), ptr(0));
                 }, this);
-                send("[sniper] child cmdline armed");
+                var k = Memory.allocUtf8String("wmpf-render-type");
+                var v = Memory.allocUtf8String(RENDER_TYPE_OVERRIDE);
+                appendSwitchFlue(this.builder, k, uint64(15), v,
+                                 v.add(RENDER_TYPE_OVERRIDE.length));
+                send("[sniper] child cmdline armed (+render-type=1)");
             } catch (e) { }
         }
     });

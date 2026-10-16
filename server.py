@@ -19,6 +19,7 @@ import frida
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HOOK_PATH = os.path.join(ROOT, "scripts", "hook_v413.js")
 PORT = 8777
+SETTLE_SECONDS = 12  # let a fresh process finish init before hooking
 
 
 def ps_appex():
@@ -213,12 +214,30 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def auto_inject_loop():
-    """Background thread: inject every new AppEx main / WeApp process."""
+    """Background thread: inject AppEx processes once they've settled.
+
+    Injecting into a freshly spawned process interrupts Chromium/V8
+    initialization and crashes it (verified: EXC_BAD_ACCESS in JIT pages).
+    We wait SETTLE_SECONDS after first sighting before attaching.
+    """
+    first_seen = {}
     while True:
         try:
+            alive = set()
             for p in ps_appex():
+                pid = p["pid"]
+                alive.add(pid)
+                now = time.time()
+                if pid not in first_seen:
+                    first_seen[pid] = now
+                    continue
+                if now - first_seen[pid] < SETTLE_SECONDS:
+                    continue
                 if p["kind"] in ("main", "miniapp", "preload", "prewarm"):
-                    INJECTOR.inject(p["pid"])
+                    INJECTOR.inject(pid)
+            for pid in list(first_seen):
+                if pid not in alive:
+                    del first_seen[pid]
         except Exception:
             pass
         time.sleep(2)

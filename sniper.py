@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Sniper daemon: inject the single-hook versionType rewriter into the
-WeChatAppEx browser main process only. No renderer touching, no other hooks.
+"""Sniper daemon: inject the stable hook set into the WeChatAppEx browser
+main process only, plus optional remote-debug appid swapping.
 
-Usage: python3 sniper.py            # run in foreground
-       nohup python3 sniper.py &    # background
+Swap control:
+  echo wx0000000000000005 > /tmp/wechat_rea/swap_appid   # enable swap
+  rm /tmp/wechat_rea/swap_appid                          # disable
+
+Workflow for debugging ANY mini-program:
+  1. enable swap with the target appid
+  2. in WeChat DevTools, start remote-debug with YOUR project (permission ok)
+  3. the spawned debug renderer runs the TARGET appid instead
+  4. full Chrome DevTools attaches to the target mini-program
 """
 import os
 import subprocess
@@ -13,6 +20,7 @@ import frida
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(ROOT, "scripts", "sniper.js")
+SWAP_FILE = "/tmp/wechat_rea/swap_appid"
 
 
 def find_main():
@@ -27,14 +35,23 @@ def find_main():
     return None
 
 
+def read_swap():
+    try:
+        v = open(SWAP_FILE).read().strip()
+        return v if v.startswith("wx") else ""
+    except FileNotFoundError:
+        return ""
+
+
 def main():
     code = open(HOOK).read()
-    session = None
+    session_obj = None
+    last_swap = None
     print("[sniper] watching WeChatAppEx main process...", flush=True)
     while True:
         try:
             pid = find_main()
-            if pid and (session is None or session[0] != pid):
+            if pid and (session_obj is None or session_obj[0] != pid):
                 try:
                     s = frida.attach(pid)
                     script = s.create_script(code)
@@ -42,16 +59,23 @@ def main():
                         f"[{time.strftime('%H:%M:%S')}][{pid}] "
                         f"{m.get('payload', m.get('description', m))}", flush=True))
                     script.load()
-                    session = (pid, s, script)
+                    session_obj = (pid, s, script)
+                    last_swap = None  # re-announce swap state to fresh script
                     print(f"[sniper] armed pid {pid}", flush=True)
                 except Exception as exc:
                     print(f"[sniper] attach {pid} failed: {exc}", flush=True)
-            elif not pid and session:
+            elif not pid and session_obj:
                 print("[sniper] main process gone, waiting...", flush=True)
-                session = None
+                session_obj = None
+
+            # propagate swap-file state changes into the script
+            swap = read_swap()
+            if session_obj and swap != last_swap:
+                session_obj[2].post({"type": "swap", "appid": swap})
+                last_swap = swap
         except Exception as exc:
             print(f"[sniper] loop: {exc}", flush=True)
-        time.sleep(2)
+        time.sleep(1)
 
 
 if __name__ == "__main__":

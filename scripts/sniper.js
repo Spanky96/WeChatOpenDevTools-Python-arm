@@ -1,17 +1,23 @@
-// SNIPER MODE - two surgical hooks, main process only.
+// SNIPER MODE - stable hooks + optional appid swap for remote-debug spawns.
 //
-// 1. JsonGetInt(versionType) -> 1 : mini-programs run in dev mode
-//    (vConsole + official debug menu) - VERIFIED WORKING.
-// 2. HasSwitch("enable-chrome-inspector") -> true : activates WeChat's
-//    built-in CDP infrastructure (endpoint generator 0x221DB58 + HTTP
-//    handler 0x5325xxx) for webview pages - under test.
+// Stable (always on):
+//  - JsonGetInt(versionType) -> 1 : dev-mode mini-programs (vConsole) VERIFIED
+//  - HasSwitch(enable-chrome-inspector) -> true
+//  - debug bools (enable_vconsole / is_game_debug / remote_debug_endpoint)
+//  - child cmdline armed with inspect switches
+// Optional (activated via message from python: {"cmd":"swap","appid":...}):
+//  - flue AppendSwitch(wmpf-appid, value) -> value replaced by target appid,
+//    so a remote-debug session launched for YOUR appid actually spawns and
+//    debugs ANY mini-program you name.
 var module = Process.findModuleByName('WeChatAppEx Framework');
 if (!module) {
     send("[-] WeChatAppEx Framework not found");
 } else {
     var base = module.base;
+    var swapAppid = null;
 
-    Interceptor.attach(base.add(0x564DB00), {   // JsonGetInt(json, key, default)
+    // ---- 1. versionType read force (dev mode)
+    Interceptor.attach(base.add(0x564DB00), {
         onEnter: function (args) {
             this.force = false;
             try {
@@ -26,7 +32,8 @@ if (!module) {
         }
     });
 
-    Interceptor.attach(base.add(0x8C2730), {    // CommandLine::HasSwitch
+    // ---- 2. chrome-inspector switch
+    Interceptor.attach(base.add(0x8C2730), {
         onEnter: function (args) {
             this.force = false;
             try {
@@ -41,41 +48,14 @@ if (!module) {
         }
     });
 
-    // 3. Arm every spawned child cmdline with the xweb inspect switches so
-    //    renderers believe remote debugging is on and dial the xweb server.
-    var appendSwitchFlue = new NativeFunction(base.add(0x1928DB4), 'void',
-        ['pointer', 'pointer', 'uint64', 'pointer', 'pointer']);
-    var INSPECT_SWITCHES = ["xweb-enable-inspect", "enable-vconsole",
-                             "auto-launch-devtools"];
-    Interceptor.attach(base.add(0x525721C), {   // child cmdline builder
-        onEnter: function (args) {
-            this.builder = args[1];
-        },
-        onLeave: function (retval) {
-            if (!this.builder || this.builder.isNull()) return;
-            try {
-                INSPECT_SWITCHES.forEach(function (s) {
-                    var buf = Memory.allocUtf8String(s);
-                    appendSwitchFlue(this.builder, buf, uint64(s.length), ptr(0), ptr(0));
-                }, this);
-                send("[sniper] child cmdline armed with inspect switches");
-            } catch (e) {
-                send("[sniper] child arm failed: " + e);
-            }
-        }
-    });
-
-    // 4. JSON bool getter: the launch sequence queries remote_debug_endpoint
-    //    via JsonGetBool - forcing true may kick off the xweb debug session.
+    // ---- 3. debug bools
     Interceptor.attach(base.add(0xF1ADB8), {
         onEnter: function (args) {
             this.force = false;
             try {
                 var k = args[1].readCString();
                 if (k === "remote_debug_endpoint" || k === "enable_vconsole"
-                        || k === "is_game_debug") {
-                    this.force = true;
-                }
+                        || k === "is_game_debug") this.force = true;
             } catch (e) { }
         },
         onLeave: function (retval) {
@@ -90,5 +70,44 @@ if (!module) {
         }
     });
 
-send("[+] sniper armed: versionType=1 + chrome-inspector + inspect switches + debug bools");
+    // ---- 4. child cmdline inspect switches
+    var appendSwitchFlue = new NativeFunction(base.add(0x1928DB4), 'void',
+        ['pointer', 'pointer', 'uint64', 'pointer', 'pointer']);
+    var INSPECT_SWITCHES = ["xweb-enable-inspect", "enable-vconsole",
+                             "auto-launch-devtools"];
+    Interceptor.attach(base.add(0x525721C), {
+        onEnter: function (args) { this.builder = args[1]; },
+        onLeave: function (retval) {
+            if (!this.builder || this.builder.isNull()) return;
+            try {
+                INSPECT_SWITCHES.forEach(function (s) {
+                    var buf = Memory.allocUtf8String(s);
+                    appendSwitchFlue(this.builder, buf, uint64(s.length), ptr(0), ptr(0));
+                }, this);
+                send("[sniper] child cmdline armed");
+            } catch (e) { }
+        }
+    });
+
+    // ---- 5. OPTIONAL appid swap on debug spawns
+    Interceptor.attach(base.add(0x1928DB4), {   // flue AppendSwitch
+        onEnter: function (args) {
+            if (!swapAppid) return;
+            try {
+                if (args[1].readCString() !== "wmpf-appid") return;
+                var buf = Memory.allocUtf8String(swapAppid);
+                args[3] = buf;                          // StringPiece begin
+                args[4] = buf.add(swapAppid.length);    // end
+                send("[swap] wmpf-appid -> " + swapAppid);
+            } catch (e) { }
+        }
+    });
+
+    recv("swap", function onMessage(msg) {
+        swapAppid = msg.appid || null;
+        send("[swap] " + (swapAppid ? "TARGET=" + swapAppid : "OFF"));
+        recv("swap", onMessage);
+    });
+
+    send("[+] sniper armed (stable hooks + appid swap ready)");
 }

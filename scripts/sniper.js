@@ -90,27 +90,5 @@ if (!module) {
         }
     });
 
-    // 5. Inject our debug endpoint at the SOURCE: the launch-config builder
-    // keeps the endpoint std::string at [x20+0x1A0]; when it's empty the
-    // JsonSet at 0x57DEA68 is skipped entirely. We hook right before the
-    // validity check and plant a local bridge URL, so every renderer gets
-    // remote_debug_endpoint = ws://127.0.0.1:9999/x in its launch config.
-    var ENDPOINT = "ws://127.0.0.1:9999/x";
-    Interceptor.attach(base.add(0x57DEA48), {
-        onEnter: function () {
-            try {
-                var x20 = this.context.x20;
-                var s = x20.add(0x1A0);
-                // libc++ SSO string: chars at [0..22], byte[23] = len<<1
-                s.writeUtf8String(ENDPOINT);
-                s.add(23).writeU8(ENDPOINT.length << 1);
-                x20.add(0x1B7).writeU8(0);   // clear stale flag byte
-                send("[sniper] planted debug endpoint " + ENDPOINT);
-            } catch (e) {
-                send("[sniper] endpoint plant failed: " + e);
-            }
-        }
-    });
-
-    send("[+] sniper armed: versionType=1 + chrome-inspector + inspect switches + debug bools + endpoint plant");
+send("[+] sniper armed: versionType=1 + chrome-inspector + inspect switches + debug bools");
 }

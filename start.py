@@ -108,7 +108,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/api/status":
+        path = self.path.split("?")[0]
+        if path == "/api/status":
             result = asyncio.run(get_targets())
             sniper_alive = _children.get("sniper") and _children["sniper"].poll() is None
             gateway_alive = _children.get("gateway") and _children["gateway"].poll() is None
@@ -118,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
                 "gateway": bool(gateway_alive),
                 "gateway_port": GATEWAY_PORT,
             })
-        elif self.path == "/api/open_devtools":
+        elif path == "/api/open_devtools":
             # target_id passed as query param
             tid = self.path.split("target_id=")[1].split("&")[0] if "target_id=" in self.path else ""
             if tid:
@@ -131,13 +132,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "url": url[:80]})
             else:
                 self._json({"ok": False, "error": "no target_id"})
-        elif self.path == "/api/start_sniper":
+        elif path == "/api/start_sniper":
             ok = spawn("sniper", "sniper.py")
             self._json({"ok": True, "started": ok})
-        elif self.path == "/api/start_gateway":
+        elif path == "/api/start_gateway":
             ok = spawn("gateway", "cdp_gateway.py")
             self._json({"ok": True, "started": ok})
-        elif self.path == "/":
+        elif path == "/":
             with open(os.path.join(WEB_DIR, "dashboard.html"), "rb") as f:
                 body = f.read()
             self.send_response(200)

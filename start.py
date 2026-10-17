@@ -124,7 +124,9 @@ class Handler(BaseHTTPRequestHandler):
             if tid:
                 url = (f"devtools://devtools/bundled/devtools_app.html"
                        f"?ws=127.0.0.1:{GATEWAY_PORT}/devtools/page/{tid}")
-                subprocess.Popen(["open", "-a", "Google Chrome", url],
+                # 'open' cmd doesn't support devtools:// — use AppleScript
+                apple = f'tell application "Google Chrome" to open location "{url}"'
+                subprocess.Popen(["osascript", "-e", apple],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self._json({"ok": True, "url": url[:80]})
             else:

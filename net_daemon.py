@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Persistent network capture daemon for WeChat mini-programs.
 
-Runs indefinitely. Hooks connect(), SSL_write, and mmcronet in:
-- WeChat main process
-- WeChatAppEx main process
-- All Helper renderer processes (auto-discovers new ones)
+Architecture discovery (2026-10-17):
+  wx.request → renderer → IPC → WeChatAppEx main → IPC → WeChat main
+    → custom TLS (NOT boringssl SSL_write) → write()/send() → TCP
 
-Logs to /tmp/wechat_rea/net_daemon.log
+This daemon hooks write() and send() in the WeChat main process to capture
+pre-encrypted network data. HTTP headers may be visible in plaintext
+before the custom TLS layer encrypts them.
+
+Logs to /tmp/wechat_rea/net_capture.log
 """
 import frida
 import os
@@ -15,147 +18,149 @@ import subprocess
 import sys
 import time
 
-LOGFILE = "/tmp/wechat_rea/net_daemon.log"
+LOGFILE = "/tmp/wechat_rea/net_capture.log"
 
 HOOK = r"""
-var PROC = 'unknown';
-var bssl = Process.findModuleByName('libboringssl.dylib');
+var count = 0;
 
-// connect() — any outgoing TCP
-try {
-    var connect_fn = Module.findGlobalExportByName('connect');
-    if (connect_fn) {
-        Interceptor.attach(connect_fn, {
-            onEnter: function(args) {
+// write() captures all outbound data
+var write_addr = null;
+try { write_addr = Module.findGlobalExportByName('write'); } catch(e) {}
+if (write_addr) {
+    Interceptor.attach(write_addr, {
+        onEnter: function(args) {
+            var fd = args[0].toInt32();
+            var len = args[2].toInt32();
+            if (len > 10) {
+                count++;
                 try {
-                    var addr = args[1];
-                    if (addr.readU16() === 2) {
-                        var port = (addr.add(2).readU8() << 8) | addr.add(3).readU8();
-                        var ip = addr.add(4).readU8() + '.' + addr.add(5).readU8() +
-                                 '.' + addr.add(6).readU8() + '.' + addr.add(7).readU8();
-                        if (ip !== '127.0.0.1' && ip !== '0.0.0.0') {
-                            send('[CONNECT] ' + ip + ':' + port);
-                        }
-                    }
-                } catch(e) {}
-            }
-        });
-    }
-} catch(e) {}
-
-// SSL_write — HTTPS request text
-if (bssl) {
-    try {
-        var sslW = bssl.getExportByName('SSL_write');
-        Interceptor.attach(sslW, {
-            onEnter: function(args) {
-                try {
-                    var data = args[1].readCString(400);
-                    if (data && /^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH) /.test(data)) {
-                        var lines = data.split(String.fromCharCode(13, 10));
-                        var url = lines[0].substring(0, 150);
-                        var host = '';
-                        for (var i = 1; i < lines.length && i < 15; i++) {
-                            if (lines[i].indexOf('Host:') === 0) {
-                                host = lines[i].trim();
-                                break;
+                    var buf = args[1];
+                    var str = '';
+                    try {
+                        str = buf.readCString(Math.min(len, 500));
+                    } catch(e) {}
+                    if (str) {
+                        str = str.replace(/[^\x20-\x7e\n\r]/g, '.');
+                        if (str.indexOf('GET ') === 0 || str.indexOf('POST ') === 0 ||
+                            str.indexOf('PUT ') === 0 || str.indexOf('DELETE ') === 0) {
+                            // HTTP request in plaintext!
+                            var lines = str.split('\r\n');
+                            send('[HTTP-REQ] ' + lines[0].substring(0, 150));
+                            for (var i = 1; i < lines.length && i < 20; i++) {
+                                if (lines[i].indexOf('Host:') === 0) {
+                                    send('  ' + lines[i].trim());
+                                    break;
+                                }
+                            }
+                        } else if (str.indexOf('HTTP/') === 0) {
+                            send('[HTTP-RSP] ' + str.substring(0, 100));
+                        } else if (count <= 30) {
+                            // non-HTTP data (possibly encrypted)
+                            var preview = str.substring(0, 60);
+                            if (preview.length > 5) {
+                                send('[DATA] fd=' + fd + ' len=' + len + ' ' + preview);
                             }
                         }
-                        send('[HTTPS] ' + url + (host ? ' | ' + host : ''));
                     }
                 } catch(e) {}
             }
-        });
-    } catch(e) {}
-}
-
-// mmcronet — URL at request creation
-var cronet = Process.findModuleByName('mmcronet');
-if (cronet) {
-    try {
-        var initFn = cronet.getExportByName('Cronet_UrlRequest_InitWithParams');
-        if (initFn) {
-            Interceptor.attach(initFn, {
-                onEnter: function(args) {
-                    try {
-                        var url = args[2].readCString();
-                        if (url) send('[CRONET] ' + url.substring(0, 150));
-                    } catch(e) {}
-                }
-            });
         }
-    } catch(e) {}
+    });
+    send('[+] write() hooked');
 }
 
-send('[READY] hooks installed');
+// sendmsg() for TCP
+var sendmsg_addr = null;
+try { sendmsg_addr = Module.findGlobalExportByName('sendmsg'); } catch(e) {}
+if (sendmsg_addr) {
+    Interceptor.attach(sendmsg_addr, {
+        onEnter: function(args) {
+            count++;
+            var fd = args[0].toInt32();
+            if (count <= 50) send('[SENDMSG] fd=' + fd);
+        }
+    });
+}
+
+// connect() for new connections
+var connect_addr = null;
+try { connect_addr = Module.findGlobalExportByName('connect'); } catch(e) {}
+if (connect_addr) {
+    Interceptor.attach(connect_addr, {
+        onEnter: function(args) {
+            try {
+                var addr = args[1];
+                if (addr.readU16() === 2) {
+                    var port = (addr.add(2).readU8() << 8) | addr.add(3).readU8();
+                    var ip = addr.add(4).readU8() + '.' + addr.add(5).readU8() + '.' +
+                             addr.add(6).readU8() + '.' + addr.add(7).readU8();
+                    if (ip !== '127.0.0.1' && ip !== '0.0.0.0') {
+                        send('[CONNECT] ' + ip + ':' + port);
+                    }
+                }
+            } catch(e) {}
+        }
+    });
+}
+
+send('[READY] all hooks installed');
 """
 
 
-def find_wechat_processes():
-    """Find all WeChat-related processes worth hooking."""
+def find_wechat_main():
     out = subprocess.run(["ps", "ax", "-o", "pid,command"],
                          capture_output=True, text=True).stdout
-    targets = {}
     for line in out.splitlines():
-        if "grep" in line or "crashpad" in line or "net_daemon" in line:
-            continue
         if "PID" in line or not line.strip():
             continue
-        try:
-            pid = int(line.strip().split()[0])
-        except ValueError:
-            continue
         if "MacOS/WeChat" in line and "AppEx" not in line and "Helper" not in line:
-            targets[pid] = "wechat-main"
-        elif "MacOS/WeChatAppEx " in line and "--type=" not in line:
-            targets[pid] = "appex-main"
-        elif "Helper (Renderer)" in line:
-            targets[pid] = "renderer"
-        elif "WeApp" in line and "--type=renderer" in line:
-            targets[pid] = "weapp"
-    return targets
+            if "grep" not in line and "net_daemon" not in line:
+                try:
+                    return int(line.strip().split()[0])
+                except ValueError:
+                    continue
+    return None
 
 
 def main():
     log = open(LOGFILE, "a", buffering=1)
     print(f"[daemon] logging to {LOGFILE}", flush=True)
-    log.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] daemon started\n")
 
-    sessions = {}  # pid -> frida session
+    current_pid = None
+    session = None
 
-    def on_message_factory(pid, name):
-        def handler(msg, data):
-            payload = msg.get("payload", "")
-            if payload and ("[" in str(payload)):
-                stamp = time.strftime("%H:%M:%S")
-                line = f"[{stamp}][{name}:{pid}] {payload}"
-                print(line, flush=True)
-                log.write(line + "\n")
-        return handler
+    def on_message(msg, data):
+        payload = msg.get("payload", "")
+        if payload:
+            stamp = time.strftime("%H:%M:%S")
+            line = f"[{stamp}] {payload}"
+            print(line, flush=True)
+            log.write(line + "\n")
 
     while True:
         try:
-            targets = find_wechat_processes()
-            # hook new processes
-            for pid, name in targets.items():
-                if pid in sessions:
-                    continue
-                try:
-                    s = frida.attach(pid)
-                    script = s.create_script(HOOK)
-                    script.on("message", on_message_factory(pid, name))
-                    script.load()
-                    sessions[pid] = s
-                    line = f"[{time.strftime('%H:%M:%S')}] hooked {name}:{pid}"
-                    print(line, flush=True)
-                    log.write(line + "\n")
-                except Exception as e:
-                    pass  # silently skip failed attaches
-
-            # clean dead sessions
-            for pid in list(sessions):
-                if pid not in targets:
-                    del sessions[pid]
+            pid = find_wechat_main()
+            if pid != current_pid:
+                if session:
+                    try:
+                        session.detach()
+                    except:
+                        pass
+                    session = None
+                if pid:
+                    try:
+                        session = frida.attach(pid)
+                        script = session.create_script(HOOK)
+                        script.on("message", on_message)
+                        script.load()
+                        current_pid = pid
+                        line = f"[{time.strftime('%H:%M:%S')}] hooked WeChat main:{pid}"
+                        print(line, flush=True)
+                        log.write(line + "\n")
+                    except Exception as e:
+                        line = f"[error] attach {pid}: {e}"
+                        print(line, flush=True)
+                        log.write(line + "\n")
         except Exception as e:
             log.write(f"[error] {e}\n")
 

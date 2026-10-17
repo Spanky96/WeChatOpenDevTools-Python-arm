@@ -9,6 +9,27 @@
 //  - flue AppendSwitch(wmpf-appid, value) -> value replaced by target appid,
 //    so a remote-debug session launched for YOUR appid actually spawns and
 //    debugs ANY mini-program you name.
+function readCStringSafe(p) {
+    try { return p.readCString(); } catch (e) { return null; }
+}
+
+// libc++ std::string at p: SSO when byte[23]&1==0 (size=byte[23]>>1),
+// otherwise long: [0]=char* [16]=size
+function readLibcxxString(p) {
+    try {
+        var last = p.add(23).readU8();
+        if ((last & 1) === 0) {
+            var len = last >> 1;
+            if (len === 0 || len > 22) return null;
+            return p.readUtf8String(len);
+        }
+        var data = p.readPointer();
+        var size = p.add(16).readULong();
+        if (size === 0 || size > 4096) return null;
+        return data.readUtf8String(size);
+    } catch (e) { return null; }
+}
+
 var module = Process.findModuleByName('WeChatAppEx Framework');
 if (!module) {
     send("[-] WeChatAppEx Framework not found");
@@ -128,6 +149,23 @@ if (!module) {
                     var v = Memory.allocUtf8String("1");
                     args[3] = v; args[4] = v.add(1);
                     send("[sniper] wmpf-render-type value 0 -> 1");
+                }
+            } catch (e) { }
+        }
+    });
+
+    // ---- Network bridge capture: wx.request-style API call params.
+    // The service layer serializes API call params (including url) into
+    // JSON via this setter; forwarding them lets the gateway synthesize
+    // DevTools Network.requestWillBeSent events.
+    Interceptor.attach(base.add(0x6BEFBC), {
+        onEnter: function (args) {
+            try {
+                if (args[1].readCString() !== "__params") return;
+                if (args[3].add(0x18).readU8() !== 4) return;  // string only
+                var s = readLibcxxString(args[3]);
+                if (s && s.length < 2048) {
+                    send("[netreq] " + s.substring(0, 200));
                 }
             } catch (e) { }
         }

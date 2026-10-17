@@ -16,6 +16,8 @@ import os
 import subprocess
 import time
 
+import json
+
 import frida
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -55,9 +57,18 @@ def main():
                 try:
                     s = frida.attach(pid)
                     script = s.create_script(code)
-                    script.on("message", lambda m, d: print(
-                        f"[{time.strftime('%H:%M:%S')}][{pid}] "
-                        f"{m.get('payload', m.get('description', m))}", flush=True))
+                    def _on_msg(m, d, pid=pid):
+                        payload = m.get("payload")
+                        if isinstance(payload, str) and payload.startswith("[netreq] "):
+                            try:
+                                with open("/tmp/wechat_rea/net_events.log", "a") as f:
+                                    f.write(json.dumps({"t": time.time(),
+                                                        "params": payload[9:]}) + "\n")
+                            except OSError:
+                                pass
+                        print(f"[{time.strftime('%H:%M:%S')}][{pid}] "
+                              f"{payload if payload else m.get('description', m)}", flush=True)
+                    script.on("message", _on_msg)
                     script.load()
                     session_obj = (pid, s, script)
                     last_swap = None  # re-announce swap state to fresh script

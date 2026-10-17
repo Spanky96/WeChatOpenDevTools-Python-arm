@@ -32,12 +32,16 @@ if (!module) {
         }
     });
 
-    // ---- 2. chrome-inspector switch
+    // ---- 2. chrome-inspector + render-type switches
+    // HasSwitch("wmpf-render-type")==true at 0x29E992C makes the spawner
+    // assign debug render type 1 to EVERY renderer -> inspector on -> the
+    // remote-debug bridge can see and debug ANY mini-program.
     Interceptor.attach(base.add(0x8C2730), {
         onEnter: function (args) {
             this.force = false;
             try {
-                if (args[1].readCString() === "enable-chrome-inspector") this.force = true;
+                var k = args[1].readCString();
+                if (k === "enable-chrome-inspector" || k === "wmpf-render-type") this.force = true;
             } catch (e) { }
         },
         onLeave: function (retval) {

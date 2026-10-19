@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <title>微信小程序 DevTools</title>
+<script src="https://cdn.jsdelivr.net/npm/js-beautify@1.15.1/js/lib/beautify.min.js"
+        onerror="window.__noBeautify=true"></script>
 <style>
   :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --fg:#e6e9ef;
           --dim:#8b93a3; --green:#3ddc84; --red:#ff5c5c; --blue:#5aa2ff;
@@ -10,59 +12,68 @@
   * { box-sizing:border-box; margin:0; padding:0; }
   html,body { height:100%; }
   body { background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
-         font:13px/1.5 -apple-system,"SF Pro Text",sans-serif; padding:14px 16px; }
-  h1 { font-size:16px; }
+         font:13px/1.5 -apple-system,"SF Pro Text",sans-serif; padding:12px 14px; }
+  h1 { font-size:15px; }
   .sub { color:var(--dim); font-size:11px; }
-  .statusbar { display:flex; gap:14px; align-items:center; padding-bottom:10px;
-               border-bottom:1px solid var(--line); margin-bottom:10px; }
+  .statusbar { display:flex; gap:12px; align-items:center; padding-bottom:8px;
+               border-bottom:1px solid var(--line); margin-bottom:8px; }
   .dot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:4px; }
   .on { background:var(--green); } .off { background:var(--red); }
   .tag { font-size:11px; color:var(--dim); }
 
-  /* mini-program selector */
-  .apps { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .apps { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
   .app-card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
-              padding:8px 12px; cursor:pointer; display:flex; gap:10px;
-              align-items:center; }
+              padding:7px 11px; cursor:pointer; display:flex; gap:10px; align-items:center; }
   .app-card.selected { border-color:var(--sel); background:#1a2740; }
   .app-card .appid { font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-  .app-card .badges { display:flex; gap:6px; }
-  .badge { font-size:10px; padding:1px 7px; border-radius:8px; background:#232937;
-           color:var(--dim); }
-  .badge.bridge { color:var(--green); }
+  .badge { font-size:10px; padding:1px 7px; border-radius:8px; background:#232937; color:var(--dim); }
+  .badge.debug { color:var(--amber); border:1px solid #6b5320; }
   .badge.agent { color:var(--blue); }
-  .app-card button { font-size:11px; padding:2px 10px; }
+  .app-card button { font-size:11px; padding:2px 10px; background:#242936; color:var(--fg);
+                     border:1px solid var(--line); border-radius:6px; cursor:pointer; }
 
-  /* tabs */
-  .tabs { display:flex; gap:4px; margin-bottom:0; }
+  /* paused banner */
+  .paused { display:none; background:#3b2e0a; border:1px solid var(--amber); color:var(--amber);
+            border-radius:8px; padding:8px 12px; margin-bottom:8px; font-size:12px;
+            align-items:center; gap:10px; flex-wrap:wrap; }
+  .paused.show { display:flex; }
+  .paused .frames { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--fg);
+                    max-height:60px; overflow:auto; flex-basis:100%; }
+  .paused button { background:#4a3a10; color:var(--amber); border:1px solid #6b5320;
+                   border-radius:6px; padding:3px 12px; cursor:pointer; font-size:11px; }
+
+  .tabs { display:flex; gap:4px; }
   .tab { background:var(--panel); border:1px solid var(--line); border-bottom:none;
-         border-radius:8px 8px 0 0; padding:7px 18px; cursor:pointer;
-         color:var(--dim); font-size:12px; }
+         border-radius:8px 8px 0 0; padding:6px 16px; cursor:pointer; color:var(--dim); font-size:12px; }
   .tab.active { color:var(--fg); background:#1e2330; font-weight:600; }
   .tabbody { background:var(--panel); border:1px solid var(--line); border-radius:0 8px 8px 8px;
-             padding:12px; flex:1; overflow:hidden; display:flex; flex-direction:column; }
-  .page { display:none; flex:1; overflow:hidden; flex-direction:column; }
+             padding:10px; flex:1; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
+  .page { display:none; flex:1; overflow:hidden; flex-direction:column; min-height:0; }
   .page.active { display:flex; }
 
-  /* console */
-  #console-scroll { overflow-y:auto; flex:1; }
-  .cline { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; padding:3px 6px;
-           border-bottom:1px dashed #20242e; word-break:break-all; white-space:pre-wrap; }
-  .cline:hover { background:#1f232c; }
-  .lv-error { color:var(--red); } .lv-warn { color:var(--amber); }
-  .lv-info { color:var(--blue); }
-  .cline .ts { color:#5a6272; margin-right:8px; font-size:10px; }
-  .srclink { color:var(--blue); cursor:pointer; text-decoration:underline;
-             margin-left:8px; font-size:11px; }
+  .toolbar { display:flex; gap:8px; margin-bottom:8px; align-items:center; }
+  .toolbar input { background:#12151b; color:var(--fg); border:1px solid var(--line);
+                   border-radius:6px; padding:4px 10px; font-size:12px; width:220px; }
+  .btn { background:#242936; color:var(--fg); border:1px solid var(--line);
+         border-radius:6px; padding:4px 12px; font-size:11px; cursor:pointer; }
+  .btn:hover { background:#2e3546; }
+  .count { font-size:11px; color:var(--dim); margin-left:auto; }
 
-  /* network */
-  .netwrap { display:flex; gap:10px; flex:1; overflow:hidden; }
-  .netlist { width:44%; overflow-y:auto; border-right:1px solid var(--line); }
+  #console-scroll { overflow-y:auto; flex:1; font-family:ui-monospace,Menlo,monospace; }
+  .cline { font-size:11.5px; padding:3px 6px; border-bottom:1px dashed #20242e;
+           word-break:break-all; white-space:pre-wrap; }
+  .cline:hover { background:#1f232c; }
+  .lv-error { color:var(--red); } .lv-warn { color:var(--amber); } .lv-info { color:var(--blue); }
+  .cline .ts { color:#5a6272; margin-right:8px; font-size:10px; }
+  .srclink { color:var(--blue); cursor:pointer; text-decoration:underline; margin-left:6px; font-size:11px; }
+
+  .netwrap { display:flex; gap:10px; flex:1; overflow:hidden; min-height:0; }
+  .netlist { width:46%; overflow-y:auto; border-right:1px solid var(--line); }
   .netdetail { flex:1; overflow-y:auto; padding-left:10px; }
   table { width:100%; border-collapse:collapse; font-size:12px; }
-  th { text-align:left; color:var(--dim); font-weight:500; padding:5px 7px;
+  th { text-align:left; color:var(--dim); font-weight:500; padding:4px 6px;
        border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--panel); }
-  td { padding:5px 7px; border-bottom:1px solid #20242e; }
+  td { padding:4px 6px; border-bottom:1px solid #20242e; }
   tr.nrow { cursor:pointer; }
   tr.nrow:hover td, tr.nrow.selected td { background:#1f232c; }
   .m { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
@@ -71,38 +82,36 @@
   .PUT,.DELETE,.PATCH { color:var(--red); }
   .s2 { color:var(--green); font-weight:600; } .s4,.s5 { color:var(--red); font-weight:600; }
   .kv { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
-  .kv .k { color:var(--dim); display:inline-block; min-width:120px; }
-  .sec { margin-bottom:12px; }
-  .sec h3 { font-size:11px; color:var(--dim); text-transform:uppercase;
-            letter-spacing:.05em; margin-bottom:6px; }
-  pre.body { background:#12151b; border:1px solid var(--line); border-radius:6px;
-             padding:8px; font-family:ui-monospace,Menlo,monospace; font-size:11px;
-             white-space:pre-wrap; word-break:break-all; max-height:260px; overflow:auto; }
+  .kv .k { color:var(--dim); display:inline-block; min-width:110px; }
+  .sec { margin-bottom:10px; }
+  .sec h3 { font-size:11px; color:var(--dim); text-transform:uppercase; margin-bottom:5px; }
+  pre.body { background:#12151b; border:1px solid var(--line); border-radius:6px; padding:8px;
+             font-family:ui-monospace,Menlo,monospace; font-size:11px; white-space:pre-wrap;
+             word-break:break-all; max-height:240px; overflow:auto; }
 
-  /* storage */
   .stbar { margin-bottom:8px; display:flex; gap:10px; align-items:center; }
 
-  /* source */
-  .srcbar { display:flex; gap:8px; margin-bottom:8px; }
-  select, .srcbar input { background:#12151b; color:var(--fg); border:1px solid var(--line);
+  .srcbar { display:flex; gap:8px; margin-bottom:6px; align-items:center; flex-wrap:wrap; }
+  select, .srcbar input[type=text] { background:#12151b; color:var(--fg); border:1px solid var(--line);
         border-radius:6px; padding:4px 8px; font-size:12px; }
-  #src-scroll { overflow:auto; flex:1; }
-  .srcline { font-family:ui-monospace,Menlo,monospace; font-size:11.5px;
-             white-space:pre; line-height:1.45; }
-  .srcline .no { color:#5a6272; display:inline-block; width:52px; text-align:right;
-                 margin-right:14px; user-select:none; }
+  #src-scroll { overflow:auto; flex:1; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
+  .srcline { white-space:pre; line-height:1.45; }
+  .srcline .no { color:#5a6272; display:inline-block; width:44px; text-align:right;
+                margin-right:12px; cursor:pointer; user-select:none; }
+  .srcline .no:hover { color:var(--red); }
   .srcline.hl { background:#3b2e0a; outline:1px solid var(--amber); }
-  .btn { background:#242936; color:var(--fg); border:1px solid var(--line);
-         border-radius:6px; padding:4px 14px; font-size:12px; cursor:pointer; }
-  .btn:hover { background:#2e3546; }
-  .empty { color:var(--dim); padding:30px; text-align:center; }
+  .srcline.bp { background:#2a1520; }
+  .srcline.bp .no { color:var(--red); font-weight:700; }
+  .empty { color:var(--dim); padding:26px; text-align:center; }
+  #repl-in { flex:1; background:#12151b; color:var(--fg); border:1px solid var(--line);
+             border-radius:6px; padding:5px 10px; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
 </style>
 </head>
 <body>
 
 <div class="statusbar">
   <h1>微信小程序 DevTools</h1>
-  <span class="sub">4.1.13 · 网络捕获 / 控制台 / Storage / 源码定位</span>
+  <span class="sub">网络 / 控制台 / Storage / 源码断点</span>
   <span style="flex:1"></span>
   <span class="tag"><span class="dot" id="d-sniper"></span>sniper</span>
   <span class="tag"><span class="dot" id="d-gateway"></span>gateway</span>
@@ -112,24 +121,47 @@
 
 <div class="apps" id="apps"></div>
 
+<div class="paused" id="paused-bar">
+  ⏸ 已暂停 <span id="paused-reason"></span>
+  <button onclick="dbgControl('resume')">▶ 继续</button>
+  <button onclick="dbgControl('stepOver')">⤵ 步过</button>
+  <button onclick="dbgControl('stepInto')">→ 步入</button>
+  <button onclick="dbgControl('stepOut')">← 步出</button>
+  <div class="frames" id="paused-frames"></div>
+</div>
+
 <div class="tabs">
   <div class="tab active" data-tab="console">控制台</div>
-  <div class="tab" data-tab="network">网络 <span id="net-badge" style="font-size:10px"></span></div>
+  <div class="tab" data-tab="network">网络 <span id="net-badge"></span></div>
   <div class="tab" data-tab="storage">Storage</div>
-  <div class="tab" data-tab="source">源码</div>
+  <div class="tab" data-tab="source">源码 · 断点</div>
 </div>
 <div class="tabbody">
   <div class="page active" id="page-console">
+    <div class="toolbar">
+      <input id="con-filter" placeholder="过滤关键字…" oninput="renderConsole()">
+      <button class="btn" onclick="state.con[state.selected]=[];renderConsole()">清空</button>
+      <span class="count" id="con-count"></span>
+    </div>
     <div id="console-scroll"></div>
+    <div class="toolbar" style="margin-top:6px">
+      <input id="repl-in" placeholder="在小程序 service 层执行 JS（断点暂停时 = 在当前栈帧求值）">
+      <button class="btn" onclick="sendEval()">执行</button>
+    </div>
   </div>
   <div class="page" id="page-network">
+    <div class="toolbar">
+      <input id="net-filter" placeholder="过滤 URL…" oninput="renderNet()">
+      <button class="btn" onclick="state.net[state.selected]=[];renderNet()">清空</button>
+      <span class="count" id="net-count"></span>
+    </div>
     <div class="netwrap">
       <div class="netlist">
         <table>
-          <thead><tr><th style="width:46px">方法</th><th>URL</th><th style="width:44px">状态</th></tr></thead>
+          <thead><tr><th style="width:66px">时间</th><th style="width:42px">方法</th><th>URL</th><th style="width:38px">状态</th></tr></thead>
           <tbody id="net-rows"></tbody>
         </table>
-        <div class="empty" id="net-empty">暂无请求 — 与小程序交互即可捕获</div>
+        <div class="empty" id="net-empty">暂无请求</div>
       </div>
       <div class="netdetail" id="net-detail"><div class="empty">点击左侧请求查看详情</div></div>
     </div>
@@ -141,7 +173,7 @@
     </div>
     <div style="overflow:auto; flex:1">
       <table>
-        <thead><tr><th style="width:32%">Key</th><th>Value</th></tr></thead>
+        <thead><tr><th style="width:30%">Key</th><th>Value</th></tr></thead>
         <tbody id="st-rows"></tbody>
       </table>
       <div class="empty" id="st-empty">点击刷新读取小程序本地存储</div>
@@ -150,7 +182,9 @@
   <div class="page" id="page-source">
     <div class="srcbar">
       <select id="src-file" onchange="loadSource()"></select>
-      <input id="src-goto" placeholder="行号" style="width:70px" onkeydown="if(event.key==='Enter')gotoLine(this.value)">
+      <input type="text" id="src-goto" placeholder="行号" style="width:64px"
+             onkeydown="if(event.key==='Enter')gotoLine(this.value)">
+      <button class="btn" id="fmt-btn" onclick="toggleFormat()">格式化</button>
       <span class="sub" id="src-info"></span>
     </div>
     <div id="src-scroll"></div>
@@ -158,177 +192,202 @@
 </div>
 
 <script>
+const CTRL = 'http://127.0.0.1:8778';
 let state = {
-  selected: null,          // selected appid
-  agents: new Set(),       // appids with captured events (= agent live)
-  net: {},                 // appid -> [net events]
-  con: {},                 // appid -> [console lines]
-  netSel: null,            // selected request id
-  srcLines: [],
+  selected: null, agents: new Set(), versions: {},
+  net: {}, con: {}, netSel: null,
+  srcLines: null, srcFormatted: null, formatted: false,
+  srcFile: null, bps: new Set(), paused: {},
   lastT: 0,
 };
-
-function dot(id, on){ document.getElementById(id).className = 'dot ' + (on?'on':'off'); }
-function esc(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-function ts(t){ const d=new Date((t||0)*1000); return d.toTimeString().slice(0,8); }
+function dot(id,on){document.getElementById(id).className='dot '+(on?'on':'off');}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function ts(t){const d=new Date((t||0)*1000);return d.toTimeString().slice(0,8);}
 
 /* ---------- app selector ---------- */
 function renderApps(targets){
-  const box = document.getElementById('apps');
-  const real = (targets||[]).filter(t=>t.appid && t.appid.startsWith('wx'));
-  box.innerHTML = '';
-  if (!real.length) {
-    box.innerHTML = '<div class="sub" style="padding:8px">未发现小程序 — 在微信开发者工具发起真机调试，再打开任意小程序</div>';
-    return;
-  }
-  if (!state.selected || !real.find(t=>t.appid===state.selected))
-    state.selected = real[0].appid;
-  for (const t of real) {
-    const a = t.appid;
-    const card = document.createElement('div');
-    card.className = 'app-card' + (a===state.selected?' selected':'');
-    card.onclick = ()=>{ state.selected=a; renderApps(targets); renderAll(); };
-    const agent = state.agents.has(a);
-    card.innerHTML = `<span class="appid">${a}</span>
-      <span class="badges">
-        ${agent?'<span class="badge agent">agent●</span>':''}
-        <span class="badge bridge">桥</span>
-      </span>
+  const box=document.getElementById('apps');
+  const real=(targets||[]).filter(t=>t.appid&&t.appid.startsWith('wx'));
+  box.innerHTML='';
+  if(!real.length){box.innerHTML='<div class="sub" style="padding:6px">未发现小程序 — 开发者工具发起真机调试后，在微信打开任意小程序</div>';return;}
+  if(!state.selected||!real.find(t=>t.appid===state.selected)) state.selected=real[0].appid;
+  for(const t of real){
+    const a=t.appid;
+    const ver=(t.url.match(/servicewechat\.com\/wx[0-9a-f]+\/(\d+)\//)||[])[1];
+    state.versions[a]=ver;
+    const card=document.createElement('div');
+    card.className='app-card'+(a===state.selected?' selected':'');
+    card.onclick=()=>{state.selected=a;renderApps(targets);renderAll();};
+    const badges=[];
+    if(state.agents.has(a)) badges.push('<span class="badge agent">agent</span>');
+    if(ver==='0') badges.push('<span class="badge debug">真机调试</span>');
+    badges.push(`<span class="badge">v${esc(ver||'?')}</span>`);
+    card.innerHTML=`<span class="appid">${a}</span><span style="display:flex;gap:5px">${badges.join('')}</span>
       <button onclick="event.stopPropagation();openDevtools('${t.targetId}')">DevTools</button>`;
     box.appendChild(card);
   }
 }
-function openDevtools(tid){ fetch('/api/open_devtools?target_id='+tid); }
+function openDevtools(tid){fetch('/api/open_devtools?target_id='+tid);}
 
 /* ---------- tabs ---------- */
 document.querySelectorAll('.tab').forEach(el=>{
-  el.onclick = ()=>{
+  el.onclick=()=>{
     document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
     document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
     el.classList.add('active');
     document.getElementById('page-'+el.dataset.tab).classList.add('active');
-    if (el.dataset.tab==='storage') loadStorage();
-    if (el.dataset.tab==='source') loadFileList();
+    if(el.dataset.tab==='storage') loadStorage();
+    if(el.dataset.tab==='source') loadFileList();
   };
 });
+document.getElementById('repl-in').addEventListener('keydown',e=>{if(e.key==='Enter')sendEval();});
 
-/* ---------- event ingestion ---------- */
+/* ---------- events ---------- */
 function ingest(evs){
-  for (const e of evs){
-    const a = e.appid || '?';
+  for(const e of evs){
+    const a=e.appid||'?';
     state.agents.add(a);
-    const t = e.type;
-    if (t==='request'||t==='response'||t==='fail'){
-      (state.net[a] = state.net[a]||[]).push(e);
-      if (state.net[a].length>400) state.net[a].shift();
-    } else if (t==='console'||t==='error'||t==='route'||t==='eval_result'){
-      (state.con[a] = state.con[a]||[]).push(e);
-      if (state.con[a].length>300) state.con[a].shift();
+    const t=e.type;
+    if(t==='request'||t==='response'||t==='fail'){
+      (state.net[a]=state.net[a]||[]).push(e);
+      if(state.net[a].length>500) state.net[a].shift();
+    } else if(t==='console'||t==='error'||t==='route'||t==='eval_result'){
+      (state.con[a]=state.con[a]||[]).push(e);
+      if(state.con[a].length>400) state.con[a].shift();
+    } else if(t==='paused'){
+      state.paused[a]=e.data;
+    } else if(t==='resumed'){
+      delete state.paused[a];
     }
+  }
+  renderPaused();
+}
+
+/* ---------- paused banner ---------- */
+function renderPaused(){
+  const bar=document.getElementById('paused-bar');
+  const p=state.paused[state.selected];
+  if(p){
+    bar.classList.add('show');
+    document.getElementById('paused-reason').textContent=
+      (p.frames&&p.frames[0]?`${p.frames[0].fn} @ ${(p.frames[0].url||'').split('/').pop()}:${p.frames[0].line}`:'')+(p.reason?` (${p.reason})`:'');
+    document.getElementById('paused-frames').innerHTML=
+      (p.frames||[]).map(f=>{
+        const file=(f.url||'').split('/').pop();
+        return `<div><span class="srclink" onclick="openSrcAt('${esc(file)}',${f.line},${f.col})">${esc(f.fn)}</span> ${esc(file)}:${f.line}:${f.col}</div>`;
+      }).join('');
+  } else bar.classList.remove('show');
+}
+async function dbgControl(action){
+  await fetch(CTRL+'/control',{method:'POST',body:JSON.stringify({appid:state.selected,action})});
+}
+async function sendEval(){
+  const el=document.getElementById('repl-in');
+  const code=el.value.trim(); if(!code) return;
+  (state.con[state.selected]=state.con[state.selected]||[]).push(
+    {t:Date.now()/1000,type:'console',data:{level:'info',args:['» '+code]}});
+  renderConsole();
+  try{
+    const r=await fetch(CTRL+'/eval',{method:'POST',body:JSON.stringify({appid:state.selected,code})});
+    const j=await r.json();
+    (state.con[state.selected]).push({t:Date.now()/1000,type:'console',
+      data:{level:j.frame?'warn':'info',args:['⇐ '+(j.value??JSON.stringify(j))+(j.frame?' (栈帧)':'')]}});
+    renderConsole();
+  }catch(e){
+    state.con[state.selected].push({t:Date.now()/1000,type:'console',data:{level:'error',args:['⇐ 请求失败: '+e]}});
+    renderConsole();
   }
 }
 
 /* ---------- console ---------- */
-function srcLinksFor(text){
-  // clickable app-service.js:LINE:COL references in error stacks
-  return text.replace(/((?:[\w.-]+\.js):(\d+):(\d+))/g,
-    '<span class="srclink" onclick="openSrcAt(\'$1\',$2,$3)">$1</span>');
-}
-function renderConsole(){
-  const box = document.getElementById('console-scroll');
-  const lines = (state.con[state.selected]||[]).slice(-150);
-  box.innerHTML = lines.map(e=>{
-    const d = e.data||{};
-    let text, level='log';
-    if (e.type==='console'){ level=d.level||'log'; text=(d.args||[]).map(fmtArg).join(' '); }
-    else if (e.type==='route'){ level='info'; text='▶ 页面: '+d.route; }
-    else if (e.type==='error'){ level='error'; text='✖ '+fmtArg(d.msg); }
-    else if (e.type==='eval_result'){ level='info'; text='⇐ '+fmtArg(d.data); }
-    else { text=fmtArg(d); }
-    return `<div class="cline lv-${esc(level)}"><span class="ts">${ts(e.t)}</span>${srcLinksFor(esc(text))}</div>`;
-  }).join('');
-  box.scrollTop = box.scrollHeight;
-}
 function fmtArg(x){
-  if (x===null||x===undefined) return String(x);
-  if (typeof x==='object'){
-    if (x.__err) return `${x.name}: ${x.message}\n${x.stack||''}`;
+  if(x===null||x===undefined) return String(x);
+  if(typeof x==='object'){
+    if(x.__err) return `${x.name}: ${x.message}\n${x.stack||''}`;
     return JSON.stringify(x);
   }
   return String(x);
 }
+function srcLinksFor(text){
+  return text.replace(/((?:[\w.-]+\.js):(\d+):(\d+))/g,
+    (m,f,l,c)=>`<span class="srclink" onclick="openSrcAt('${f}',${l},${c})">${m}</span>`);
+}
+function renderConsole(){
+  const box=document.getElementById('console-scroll');
+  const q=(document.getElementById('con-filter').value||'').toLowerCase();
+  const lines=(state.con[state.selected]||[]).filter(e=>{
+    if(!q) return true;
+    const d=e.data||{};
+    return JSON.stringify(d).toLowerCase().includes(q);
+  }).slice(-200);
+  document.getElementById('con-count').textContent=`${lines.length} 条`;
+  box.innerHTML=lines.map(e=>{
+    const d=e.data||{}; let text,level='log';
+    if(e.type==='console'){level=d.level||'log';text=(d.args||[]).map(fmtArg).join(' ');}
+    else if(e.type==='route'){level='info';text='▶ 页面: '+d.route;}
+    else if(e.type==='error'){level='error';text='✖ '+fmtArg(d.msg);}
+    else if(e.type==='eval_result'){level='info';text='⇐ '+fmtArg(d.data);}
+    else text=fmtArg(d);
+    return `<div class="cline lv-${esc(level)}"><span class="ts">${ts(e.t)}</span>${srcLinksFor(esc(text))}</div>`;
+  }).join('');
+  box.scrollTop=box.scrollHeight;
+}
 
 /* ---------- network ---------- */
+function shortUrl(u){u=String(u||'');try{const x=new URL(u);return (x.pathname+x.search).slice(0,80);}catch(e){return u.slice(0,80);}}
 function renderNet(){
-  const tb = document.getElementById('net-rows');
-  const evs = state.net[state.selected]||[];
-  document.getElementById('net-badge').textContent = evs.length?`(${evs.length})`:'';
-  document.getElementById('net-empty').style.display = evs.length?'none':'block';
+  const tb=document.getElementById('net-rows');
+  const q=(document.getElementById('net-filter').value||'').toLowerCase();
+  const evs=(state.net[state.selected]||[]).filter(e=>!q||String((e.data||{}).url||'').toLowerCase().includes(q));
+  document.getElementById('net-badge').textContent=evs.length?`(${evs.length})`:'';
+  document.getElementById('net-count').textContent=`${evs.length} 条`;
+  document.getElementById('net-empty').style.display=evs.length?'none':'block';
   tb.innerHTML='';
-  // newest first
-  for (const e of evs.slice().reverse()){
+  for(const e of evs.slice().reverse()){
     const d=e.data||{};
     const tr=document.createElement('tr');
     tr.className='nrow'+(state.netSel===d.id?' selected':'');
-    if (e.type==='request'){
-      tr.innerHTML=`<td class="m method ${esc(d.method||'GET')}">${esc(d.method||'GET')}</td>
+    if(e.type==='request'){
+      tr.innerHTML=`<td class="m" style="color:var(--dim)">${ts(e.t)}</td>
+        <td class="m method ${esc(d.method||'GET')}">${esc(d.method||'GET')}</td>
         <td class="m">${esc(shortUrl(d.url))}</td><td class="m" style="color:var(--dim)">…</td>`;
-    } else if (e.type==='response'){
+    }else if(e.type==='response'){
       const st=d.status||0;
-      tr.innerHTML=`<td class="m" style="color:var(--dim)">↳</td>
-        <td class="m" style="color:var(--dim)">${esc(shortUrl(d.url))}</td>
+      tr.innerHTML=`<td class="m" style="color:var(--dim)">${ts(e.t)}</td>
+        <td class="m" style="color:var(--dim)">↳</td><td class="m" style="color:var(--dim)">${esc(shortUrl(d.url))}</td>
         <td class="m s${String(st)[0]}">${st}</td>`;
-    } else {
-      tr.innerHTML=`<td class="m" style="color:var(--red)">✖</td>
-        <td class="m" style="color:var(--red)">${esc(shortUrl(d.url))}</td>
-        <td></td>`;
+    }else{
+      tr.innerHTML=`<td class="m" style="color:var(--dim)">${ts(e.t)}</td>
+        <td class="m" style="color:var(--red)">✖</td><td class="m" style="color:var(--red)">${esc(shortUrl(d.url))}</td><td></td>`;
     }
-    tr.onclick=()=>{ state.netSel=d.id; renderNet(); renderDetail(e); };
+    tr.onclick=()=>{state.netSel=d.id;renderNet();renderDetail(e);};
     tb.appendChild(tr);
   }
 }
-function shortUrl(u){
-  u=String(u||'');
-  try{ const x=new URL(u); return (x.pathname+x.search).slice(0,90); }catch(e){ return u.slice(0,90); }
-}
+function parseHeader(h){const o={};if(typeof h==='string'){try{Object.assign(o,JSON.parse(h));return o;}catch(e){}}if(typeof h==='object'&&h)return h;return {};}
+function pretty(x){if(typeof x==='string'){try{return JSON.stringify(JSON.parse(x),null,1);}catch(e){return x;}}return fmtArg(x);}
 function renderDetail(e){
   const box=document.getElementById('net-detail');
   const d=e.data||{};
-  // find the matching request for a response/fail
   let req=null;
-  if (e.type!=='request'){
-    req=(state.net[state.selected]||[]).find(x=>x.type==='request'&&x.data&&x.data.id===d.id);
-  }
-  const kv=(o)=>Object.entries(o||{}).map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span>${esc(v)}</div>`).join('')||'<div class="sub">（无）</div>';
-  let html='';
-  html+=`<div class="sec"><h3>概览</h3><div class="kv">
+  if(e.type!=='request') req=(state.net[state.selected]||[]).find(x=>x.type==='request'&&x.data&&x.data.id===d.id);
+  const kv=o=>Object.entries(o||{}).map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span>${esc(v)}</div>`).join('')||'<div class="sub">（无）</div>';
+  let html=`<div class="sec"><h3>概览</h3><div class="kv">
     <span class="k">URL</span>${esc(d.url||'')}<br>
     <span class="k">方法</span>${esc((req&&req.data.method)||d.method||'-')}<br>
     <span class="k">状态</span>${d.status!==undefined?esc(d.status):'…'}<br>
-    <span class="k">API</span>${esc(d.api||'-')}<br>
-    <span class="k">时间</span>${ts(e.t)}</div></div>`;
-  if (req){
+    <span class="k">时间</span>${ts(e.t)}<br>
+    <span class="k">API</span>${esc(d.api||'-')}</div></div>`;
+  if(req){
     html+=`<div class="sec"><h3>请求头</h3>${kv(parseHeader(req.data.header))}</div>`;
     html+=`<div class="sec"><h3>请求数据</h3><pre class="body">${esc(pretty(req.data.data))}</pre></div>`;
   }
-  if (e.type==='response'){
+  if(e.type==='response'){
     html+=`<div class="sec"><h3>响应头</h3>${kv(parseHeader(d.header))}</div>`;
     html+=`<div class="sec"><h3>响应体</h3><pre class="body">${esc(pretty(d.data))}</pre></div>`;
   }
-  if (e.type==='fail'){
-    html+=`<div class="sec"><h3>失败</h3><pre class="body" style="color:var(--red)">${esc(fmtArg(d.err))}</pre></div>`;
-  }
+  if(e.type==='fail') html+=`<div class="sec"><h3>失败</h3><pre class="body" style="color:var(--red)">${esc(fmtArg(d.err))}</pre></div>`;
   box.innerHTML=html;
-}
-function parseHeader(h){
-  const o={};
-  if (typeof h==='string'){ try{ Object.assign(o, JSON.parse(h)); return o; }catch(e){} }
-  if (typeof h==='object'&&h) return h;
-  return {};
-}
-function pretty(x){
-  if (typeof x==='string'){ try{ return JSON.stringify(JSON.parse(x),null,1); }catch(e){ return x; } }
-  return fmtArg(x);
 }
 
 /* ---------- storage ---------- */
@@ -337,100 +396,119 @@ async function loadStorage(){
   info.textContent='读取中…';
   try{
     const r=await fetch('/api/storage?appid='+state.selected);
-    const j=await r.json();
-    const d=j.data||{};
-    if (d.err){ info.textContent='错误: '+d.err; return; }
+    const j=await r.json(); const d=j.data||{};
+    if(d.err){info.textContent='错误: '+d.err;return;}
     info.textContent=`${d.currentSize??'?'} / ${d.limitSize??'?'} KB · ${((d.keys)||[]).length} keys`;
-    const tb=document.getElementById('st-rows');
-    tb.innerHTML=((d.kv&&Object.entries(d.kv))||[]).map(([k,v])=>
+    document.getElementById('st-rows').innerHTML=((d.kv&&Object.entries(d.kv))||[]).map(([k,v])=>
       `<tr><td class="m">${esc(k)}</td><td class="m" style="word-break:break-all">${esc(String(v).slice(0,1500))}</td></tr>`).join('');
-    document.getElementById('st-empty').style.display=
-      ((d.keys)||[]).length?'none':'block';
-  }catch(e){ info.textContent='读取失败: '+e; }
+    document.getElementById('st-empty').style.display=((d.keys)||[]).length?'none':'block';
+  }catch(e){info.textContent='读取失败: '+e;}
 }
 
-/* ---------- source ---------- */
+/* ---------- source + breakpoints ---------- */
 async function loadFileList(){
-  if (!state.selected) return;
+  if(!state.selected) return;
   const sel=document.getElementById('src-file');
-  if (sel.dataset.appid===state.selected && sel.options.length) return;
+  if(sel.dataset.appid===state.selected&&sel.options.length) return;
   sel.dataset.appid=state.selected;
   sel.innerHTML='<option>加载中…</option>';
   try{
     const r=await fetch('/api/files?appid='+state.selected);
     const j=await r.json();
-    sel.innerHTML=(j.files||[]).map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join('')
-      ||'<option>（无文件 — 需先打开过该小程序）</option>';
+    sel.innerHTML=(j.files||[]).map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join('')||'<option>（无）</option>';
     await loadSource();
-  }catch(e){ sel.innerHTML='<option>加载失败</option>'; }
+  }catch(e){sel.innerHTML='<option>加载失败</option>';}
 }
-async function loadSource(hlLine, hlCol){
+async function loadSource(hlLine,hlCol){
   const sel=document.getElementById('src-file');
   const file=sel.value;
-  if (!file||file.includes('（')) return;
-  document.getElementById('src-info').textContent='加载中… '+file;
+  if(!file||file.includes('（'))return;
+  state.srcFile=file;
+  document.getElementById('src-info').textContent='加载中…';
   try{
     const r=await fetch(`/api/source?appid=${state.selected}&file=${encodeURIComponent(file)}`);
     const j=await r.json();
-    if (j.error){ document.getElementById('src-info').textContent=j.error; return; }
+    if(j.error){document.getElementById('src-info').textContent=j.error;return;}
     state.srcLines=j.lines||[];
+    state.formatted=false; state.srcFormatted=null;
+    document.getElementById('fmt-btn').textContent='格式化';
     renderSource(hlLine,hlCol);
-    document.getElementById('src-info').textContent=`${file} · ${state.srcLines.length} 行`;
-  }catch(e){ document.getElementById('src-info').textContent='加载失败'; }
+    document.getElementById('src-info').textContent=`${file} · ${state.srcLines.length} 行${hlLine?' · 已定位 L'+hlLine:''}`;
+  }catch(e){document.getElementById('src-info').textContent='加载失败';}
+}
+function toggleFormat(){
+  if(!state.srcLines)return;
+  state.formatted=!state.formatted;
+  if(state.formatted&&window.js_beautify){
+    const src=state.srcLines.join('\n');
+    const fmt=js_beautify(src,{indent_size:2,preserve_newlines:false});
+    state.srcFormatted=fmt.split('\n');
+    document.getElementById('src-info').textContent+='（格式化后行号≠报错行号）';
+  }
+  document.getElementById('fmt-btn').textContent=state.formatted?'原始':'格式化';
+  renderSource();
 }
 function renderSource(hlLine,hlCol){
   const box=document.getElementById('src-scroll');
+  const lines=state.formatted?(state.srcFormatted||[]):state.srcLines;
+  if(!lines){box.innerHTML='<div class="empty">选择文件</div>';return;}
+  const bps=state.bps;
   const frag=[];
-  const max=state.srcLines.length;
-  for(let i=0;i<max;i++){
+  for(let i=0;i<lines.length;i++){
     const n=i+1;
-    const hl=hlLine===n?' hl':'';
-    let text=esc(state.srcLines[i]||'');
-    if (hlLine===n&&hlCol){
-      // mark the column with a caret
-      const pre=text.slice(0,hlCol), post=text.slice(hlCol);
-      text=pre+'‸'+post;
-    }
-    frag.push(`<div class="srcline${hl}" id="L${n}"><span class="no">${n}</span>${text}</div>`);
+    const key=state.srcFile+':'+n;
+    const cls=(hlLine===n?' hl':'')+(bps.has(key)?' bp':'');
+    frag.push(`<div class="srcline${cls}" id="L${n}"><span class="no" onclick="toggleBp(${n})">${n}</span>${esc(lines[i]||'')}</div>`);
   }
   box.innerHTML=frag.join('');
-  if (hlLine){
-    const el=document.getElementById('L'+hlLine);
-    if (el) el.scrollIntoView({block:'center'});
-  } else box.scrollTop=0;
+  if(hlLine){const el=document.getElementById('L'+hlLine);if(el)el.scrollIntoView({block:'center'});}
+  else box.scrollTop=0;
 }
-function gotoLine(n){
-  const ln=parseInt(n); if(ln) renderSource(ln);
-  const el=document.getElementById('L'+ln); if(el) el.scrollIntoView({block:'center'});
+async function toggleBp(line){
+  const key=state.srcFile+':'+line;
+  const removing=state.bps.has(key);
+  try{
+    const r=await fetch(CTRL+'/breakpoint',{method:'POST',body:JSON.stringify({
+      appid:state.selected,file:state.srcFile,line,remove:removing})});
+    const j=await r.json();
+    if(j.ok){ removing?state.bps.delete(key):state.bps.add(key); }
+    else { (state.con[state.selected]=state.con[state.selected]||[]).push(
+      {t:Date.now()/1000,type:'console',data:{level:'error',args:['断点失败: '+JSON.stringify(j.raw||j)]}});
+      renderConsole(); }
+  }catch(e){}
+  renderSource();
 }
+function gotoLine(n){const ln=parseInt(n);renderSource(ln);const el=document.getElementById('L'+ln);if(el)el.scrollIntoView({block:'center'});}
 function openSrcAt(ref,line,col){
-  // ref like "app-service.js" — switch to source tab
   document.querySelector('.tab[data-tab=source]').click();
   const sel=document.getElementById('src-file');
-  const pick=()=>{ loadSource(line,col); };
-  if (sel.dataset.appid!==state.selected){ loadFileList().then(()=>{ for(const o of sel.options){ if(o.value===ref){sel.value=ref;break;} } pick(); }); }
-  else { for(const o of sel.options){ if(o.value===ref){ sel.value=ref; break; } } pick(); }
+  const pick=()=>{loadSource(line,col);};
+  if(sel.dataset.appid!==state.selected){
+    loadFileList().then(()=>{for(const o of sel.options){if(o.value.endsWith(ref)||o.value===ref){sel.value=o.value;break;}}pick();});
+  }else{
+    for(const o of sel.options){if(o.value.endsWith(ref)||o.value===ref){if(sel.value!==o.value){sel.value=o.value;}break;}}
+    if(state.srcFile===sel.value&&state.srcLines) renderSource(line,col); else pick();
+  }
 }
 
-/* ---------- polling ---------- */
-function renderAll(){ renderConsole(); renderNet(); }
+/* ---------- poll ---------- */
+function renderAll(){renderConsole();renderNet();renderPaused();}
 async function poll(){
   try{
-    const r=await fetch('/api/status'); const st=await r.json();
-    dot('d-sniper',st.sniper); dot('d-gateway',st.gateway); dot('d-sess',st.sess);
+    const r=await fetch('/api/status');const st=await r.json();
+    dot('d-sniper',st.sniper);dot('d-gateway',st.gateway);dot('d-sess',st.sess);
     document.getElementById('bridge-tag').textContent='桥: '+(st.bridge||'未连接');
     renderApps(st.targets);
     const r2=await fetch('/api/events?since='+state.lastT);
     const evs=await r2.json();
-    if (Array.isArray(evs)&&evs.length){
+    if(Array.isArray(evs)&&evs.length){
       ingest(evs);
       for(const e of evs) if(e.t>state.lastT) state.lastT=e.t;
-      renderAll();
+      renderConsole();renderNet();
     }
   }catch(e){}
 }
-poll();
-setInterval(poll, 2000);
+poll(); setInterval(poll,2000);
 </script>
 </body>
 </html>

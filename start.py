@@ -179,14 +179,20 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
                                        if "?" in self.path else "")
             appid = (qs.get("appid") or [""])[0]
-            outdir = ensure_unpacked(appid)
             files = []
-            for dirpath, _dirnames, filenames in os.walk(outdir):
-                for fn in filenames:
-                    if fn.endswith((".js", ".json")):
-                        rel = os.path.relpath(os.path.join(dirpath, fn),
-                                              outdir)
-                        files.append(rel)
+            srcdir = f"/tmp/wechat_rea/src_{appid}"
+            if os.path.isdir(srcdir):
+                for fn in os.listdir(srcdir):
+                    if fn.endswith(".js"):
+                        files.append(fn)
+            else:
+                outdir = ensure_unpacked(appid)
+                for dirpath, _dirnames, filenames in os.walk(outdir):
+                    for fn in filenames:
+                        if fn.endswith((".js", ".json")):
+                            rel = os.path.relpath(os.path.join(dirpath, fn),
+                                                  outdir)
+                            files.append(rel)
             files.sort()
             self._json({"appid": appid, "files": files[:400]})
         elif path == "/api/source":
@@ -269,18 +275,36 @@ def ensure_unpacked(appid):
     return outdir
 
 
+def runtime_src_path(appid, fname):
+    """Runtime script saved by service_session (exact line mapping)."""
+    srcdir = f"/tmp/wechat_rea/src_{appid}"
+    cand = os.path.join(srcdir, fname)
+    if os.path.isfile(cand):
+        return cand
+    # dash-joined runtime name e.g. usr_app-service.js / subPackages_...
+    base = os.path.basename(fname)
+    for alt in (f"usr_{base}", base,
+                "usr_subPackages_" + base, "subPackages_" + base):
+        cand = os.path.join(srcdir, alt)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
 def read_source(appid, fname):
-    """Return source file content for a mini-program (path-safe)."""
-    outdir = ensure_unpacked(appid)
+    """Runtime script first (exact line numbers), else unpacked package."""
     safe = os.path.normpath(fname).lstrip("/")
     if ".." in safe.split(os.sep):
         return None
-    path = os.path.join(outdir, safe)
-    if not os.path.isfile(path):
-        return None
+    path = runtime_src_path(appid, safe)
+    if path is None:
+        outdir = ensure_unpacked(appid)
+        path = os.path.join(outdir, safe)
+        if not os.path.isfile(path):
+            return None
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
-            return f.read(4 * 1024 * 1024)
+            return f.read(6 * 1024 * 1024)
     except OSError:
         return None
 

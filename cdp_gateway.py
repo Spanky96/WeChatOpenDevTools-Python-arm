@@ -198,9 +198,7 @@ class NetInjector:
                 await self.send_event("Runtime.consoleAPICalled", {
                     "type": cdptype,
                     "args": payload,
-                    "executionContextId": 3,
                     "timestamp": t,
-                    "stackTrace": {"callFrames": []},
                 })
             elif e.get("type") == "request":
                 body = d.get("data")

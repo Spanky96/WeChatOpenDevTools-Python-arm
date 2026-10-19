@@ -20,6 +20,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +39,7 @@ CTRL_PORT = 8778
 MP = {}            # appid -> {sid, ctx, scripts, paused, topFrame, bps, fails}
 TARGETS_CACHE = []
 ONLINE = {}        # appid -> last heartbeat/event ts (agent hub, no bridge)
+FAILED_CTX = {}    # appid -> ts of last ctx-discovery failure (cooldown)
 ws_ref = {}
 _loop = None
 _ctrl_queue = None  # asyncio.Queue of (req, done_event, result_box)
@@ -49,6 +51,8 @@ def emit(rec):
 
 
 def find_port():
+    """Bridge port: DevTools log first; lsof fallback (watch listeners,
+    never touches the relay — probing the relay kills its client slot)."""
     ports = []
     for f in sorted(glob.glob(os.path.join(LOGDIR, "*.log")),
                     key=os.path.getmtime)[-4:]:
@@ -57,7 +61,48 @@ def find_port():
                 ports += re.findall(r"ws=127\.0\.0\.1:(\d+)", fh.read())
         except OSError:
             pass
-    return int(ports[-1]) if ports else None
+    if ports:
+        return int(ports[-1])
+    # lsof: ports the DevTools app listens on (candidate bridge relays)
+    try:
+        out = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+                             capture_output=True, text=True,
+                             timeout=5).stdout
+        cands = []
+        for line in out.splitlines():
+            if "wechatweb" not in line:
+                continue
+            m = re.search(r"127\.0\.0\.1:(\d+)|\*:(\d+)", line)
+            if m:
+                p = int(m.group(1) or m.group(2))
+                if p not in (58001, 62586):   # known non-CDP services
+                    cands.append(p)
+        return cands[0] if cands else None
+    except Exception:
+        return None
+
+
+def find_port_candidates():
+    """All plausible bridge ports (log + lsof), newest first."""
+    cands = []
+    p = find_port()
+    if p:
+        cands.append(p)
+    try:
+        out = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+                             capture_output=True, text=True,
+                             timeout=5).stdout
+        for line in out.splitlines():
+            if "wechatweb" not in line:
+                continue
+            m = re.search(r"127\.0\.0\.1:(\d+)|\*:(\d+)", line)
+            if m:
+                q = int(m.group(1) or m.group(2))
+                if q not in cands and q not in (58001, 62586):
+                    cands.append(q)
+    except Exception:
+        pass
+    return cands
 
 
 class Br:
@@ -176,6 +221,8 @@ async def setup_targets(br):
         seen.add(appid)
         if appid in MP:
             continue
+        if time.time() - FAILED_CTX.get(appid, 0) < 60:
+            continue   # recently failed — don't churn attach on dead targets
         a = await br.cmd("Target.attachToTarget", targetId=t["targetId"],
                          flatten=True, timeout=6)
         sid = a.get("sessionId") if isinstance(a, dict) else None
@@ -193,10 +240,15 @@ async def setup_targets(br):
                 break
         if svc is None:
             print(f"[sess] {appid}: no service ctx", flush=True)
+            FAILED_CTX[appid] = time.time()
             continue
-        has = await eval_js(br, sid, svc, "typeof __REA__", timeout=4)
-        if has != "object":
-            await eval_js(br, sid, svc, agent, timeout=9)
+        has = await eval_js(br, sid, svc,
+                            "typeof __REA__+'/'+(__REA__?__REA__.version:0)",
+                            timeout=4)
+        if has != "object/4":
+            agent_src = open(os.path.join(
+                ROOT, "scripts", "rea_agent.js")).read()
+            await eval_js(br, sid, svc, agent_src, timeout=9)
             print(f"[sess] agent injected -> {appid}", flush=True)
         # NOTE: Debugger.enable stays OFF by default — enabling it on the
         # service context stalls live event capture (observed 2026-10-19).
@@ -532,8 +584,8 @@ async def run_session(port):
                     await asyncio.sleep(4)
                     continue
                 stale_cycles = 0
-                for _ in range(5):   # ~15s rounds, 3s polls (bridge-safe)
-                    await asyncio.sleep(3.0)
+                for _ in range(2):   # ~16s rounds, 8s polls (gentler)
+                    await asyncio.sleep(8.0)
                     await legacy_file_requests(br)
                     activity = False
                     for appid in list(MP):
@@ -576,12 +628,23 @@ async def main():
     await websockets.serve(agent_hub, "127.0.0.1", 8779,
                            max_size=2**22)
 
+    refused = 0
+    cand_idx = 0
     while True:
-        port = find_port()
+        cands = find_port_candidates()
+        port = cands[cand_idx % len(cands)] if cands else None
         if port:
             try:
                 await run_session(port)
+                refused = 0
+                cand_idx = 0
             except Exception as exc:
+                if "RefusedError" in type(exc).__name__ or \
+                        "Connect call failed" in str(exc):
+                    refused += 1
+                    if refused >= 3 and cands:
+                        cand_idx += 1      # rotate to next candidate
+                        refused = 0
                 print(f"[sess] session ended: {type(exc).__name__} "
                       f"{str(exc)[:80]}", flush=True)
         await asyncio.sleep(3)

@@ -182,7 +182,27 @@ class NetInjector:
             t = e.get("t", time.time())
             d = e.get("data") or {}
             rid = str(d.get("id") or f"{t}-{e.get('type')}")
-            if e.get("type") == "request":
+            if e.get("type") in ("console", "error"):
+                # synthesize V8 console events (WeChat's service console
+                # is custom — no native consoleAPICalled reaches DevTools)
+                level = d.get("level") or ("error" if e["type"] == "error"
+                                           else "log")
+                cdptype = {"log": "log", "info": "info",
+                           "warn": "warning", "error": "error"}.get(level,
+                                                                    "log")
+                args = d.get("args")
+                if not isinstance(args, list):
+                    args = [d.get("msg") or str(d)]
+                payload = [{"type": "string", "value": str(a)}
+                           for a in args[:8]]
+                await self.send_event("Runtime.consoleAPICalled", {
+                    "type": cdptype,
+                    "args": payload,
+                    "executionContextId": 3,
+                    "timestamp": t,
+                    "stackTrace": {"callFrames": []},
+                })
+            elif e.get("type") == "request":
                 body = d.get("data")
                 self.bodies[rid] = {"req": body, "resp": None,
                                     "mime": guess_mime(body)}
@@ -303,7 +323,10 @@ async def proxy_session(front_ws, target_id, bridge_port):
                         "id": d.get("id"),
                         "result": {"postData": body or ""}}))
                     continue
-                if method == "Network.enable":
+                if method in ("Network.enable", "Runtime.enable"):
+                    # feed console on Runtime.enable (DevTools startup),
+                    # network needs Network.enable too — starting on either
+                    # covers both panels
                     appid = appid_of_target(target_id)
                     if not appid:
                         await refresh_targets(bridge_port)

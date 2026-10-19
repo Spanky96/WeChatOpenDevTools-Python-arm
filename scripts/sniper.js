@@ -57,17 +57,27 @@ if (!module) {
     // HasSwitch("wmpf-render-type")==true at 0x29E992C makes the spawner
     // assign debug render type 1 to EVERY renderer -> inspector on -> the
     // remote-debug bridge can see and debug ANY mini-program.
+    // enable-chrome-inspector additionally makes the spawner pass
+    // --remote-debugging-port=62168 to a special child (fixed WeChat port,
+    // discovered 2026-10-18 at 0x540de64 / 0x540e75c).
+    // export-wxpkg-content / use-debug-wxpkg experiment: may dump decrypted
+    // base-library wxpkg (V1MMWX) to disk.
+    var FORCE_SWITCHES = {
+        "enable-chrome-inspector": 1,
+        "wmpf-render-type": 1,
+        "export-wxpkg-content": 1,
+        "use-debug-wxpkg": 1,
+    };
     Interceptor.attach(base.add(0x8C2730), {
         onEnter: function (args) {
             this.force = false;
             try {
                 var k = args[1].readCString();
-                if (k === "enable-chrome-inspector" || k === "wmpf-render-type") this.force = true;
+                if (FORCE_SWITCHES[k]) this.force = true;
             } catch (e) { }
         },
         onLeave: function (retval) {
             if (this.force && retval.toInt32() === 0) {
-                send("[sniper] HasSwitch(enable-chrome-inspector) -> true");
                 retval.replace(ptr(1));
             }
         }
@@ -99,7 +109,8 @@ if (!module) {
     var appendSwitchFlue = new NativeFunction(base.add(0x1928DB4), 'void',
         ['pointer', 'pointer', 'uint64', 'pointer', 'pointer']);
     var INSPECT_SWITCHES = ["xweb-enable-inspect", "enable-vconsole",
-                             "auto-launch-devtools"];
+                             "auto-launch-devtools",
+                             "export-wxpkg-content", "use-debug-wxpkg"];
     // render-type=1 registers the renderer with the debug bridge; appending
     // the same switch key overwrites WeChat's default 0 (Chromium switch map)
     var RENDER_TYPE_OVERRIDE = "1";
@@ -154,22 +165,9 @@ if (!module) {
         }
     });
 
-    // ---- Network bridge capture: wx.request-style API call params.
-    // The service layer serializes API call params (including url) into
-    // JSON via this setter; forwarding them lets the gateway synthesize
-    // DevTools Network.requestWillBeSent events.
-    Interceptor.attach(base.add(0x6BEFBC), {
-        onEnter: function (args) {
-            try {
-                if (args[1].readCString() !== "__params") return;
-                if (args[3].add(0x18).readU8() !== 4) return;  // string only
-                var s = readLibcxxString(args[3]);
-                if (s && s.length < 2048) {
-                    send("[netreq] " + s.substring(0, 200));
-                }
-            } catch (e) { }
-        }
-    });
+    // ---- (removed) hot __params JSON-setter hook — superseded by the
+    // mmcronet C-API capture daemon (net_cronet.py). Hooking the shared
+    // JSON setter on every call was a hot path and risked instability.
 
     recv("swap", function onMessage(msg) {
         swapAppid = msg.appid || null;

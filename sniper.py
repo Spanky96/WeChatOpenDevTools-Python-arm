@@ -12,6 +12,7 @@ Workflow for debugging ANY mini-program:
   3. the spawned debug renderer runs the TARGET appid instead
   4. full Chrome DevTools attaches to the target mini-program
 """
+import fcntl
 import os
 import subprocess
 import time
@@ -46,6 +47,15 @@ def read_swap():
 
 
 def main():
+    # single-instance lock: multiple snipers double-hook and crash WeChatAppEx
+    os.makedirs("/tmp/wechat_rea", exist_ok=True)
+    lock = open("/tmp/wechat_rea/sniper.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("[sniper] another instance holds the lock, exiting", flush=True)
+        return
+
     code = open(HOOK).read()
     session_obj = None
     last_swap = None

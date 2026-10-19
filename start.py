@@ -59,6 +59,19 @@ def find_bridge_port():
     return ports[-1] if ports else None
 
 
+_targets_cache = {"ts": 0.0, "data": None}
+
+
+async def get_targets_cached():
+    """Bridge lookups are expensive and the bridge is fragile — cache 4s."""
+    now = time.time()
+    if _targets_cache["data"] is not None and now - _targets_cache["ts"] < 4:
+        return _targets_cache["data"]
+    data = await get_targets()
+    _targets_cache["ts"], _targets_cache["data"] = now, data
+    return data
+
+
 async def get_targets():
     port = find_bridge_port()
     if not port:
@@ -110,15 +123,29 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/status":
-            result = asyncio.run(get_targets())
+            result = asyncio.run(get_targets_cached())
             sniper_alive = _children.get("sniper") and _children["sniper"].poll() is None
             gateway_alive = _children.get("gateway") and _children["gateway"].poll() is None
+            sess_alive = _children.get("sess") and _children["sess"].poll() is None
             self._json({
                 **result,
                 "sniper": bool(sniper_alive),
                 "gateway": bool(gateway_alive),
+                "sess": bool(sess_alive),
                 "gateway_port": GATEWAY_PORT,
             })
+        elif path == "/api/events":
+            self._json(recent_events())
+        elif path == "/api/eval":
+            code = self.path.split("code=", 1)[1] if "code=" in self.path else ""
+            import urllib.parse
+            code = urllib.parse.unquote(code)
+            if code:
+                with open("/tmp/wechat_rea/service_eval", "w") as f:
+                    f.write(code)
+                self._json({"ok": True})
+            else:
+                self._json({"ok": False, "error": "no code"})
         elif path == "/api/open_devtools":
             # target_id passed as query param
             tid = self.path.split("target_id=")[1].split("&")[0] if "target_id=" in self.path else ""
@@ -151,11 +178,31 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
+def recent_events(limit=200, since=0.0):
+    """Recent service-layer events newer than `since` (unix seconds)."""
+    try:
+        with open("/tmp/wechat_rea/service_events.jsonl",
+                  encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-limit * 3:]
+        out = []
+        for ln in lines:
+            try:
+                rec = json.loads(ln)
+            except ValueError:
+                continue
+            if rec.get("t", 0) > since:
+                out.append(rec)
+        return out[-limit:]
+    except FileNotFoundError:
+        return []
+
+
 def auto_manage():
-    """Background thread: keep sniper and gateway running."""
+    """Background thread: keep sniper, gateway and service session running."""
     while True:
         spawn("sniper", "sniper.py")
         spawn("gateway", "cdp_gateway.py")
+        spawn("sess", "service_session.py")
         time.sleep(5)
 
 

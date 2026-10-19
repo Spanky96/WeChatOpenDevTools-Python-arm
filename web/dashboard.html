@@ -14,7 +14,7 @@
   .row { display:flex; gap:8px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }
   .status-dot { width:8px; height:8px; border-radius:50%; margin-right:4px; }
   .on { background:var(--green); } .off { background:var(--red); }
-  .tag { font-size:11px; color:var(--dim); }
+  .tag { font-size:11px; color:var(--dim); margin-right:12px; }
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
   .panel h2 { font-size:13px; color:var(--dim); font-weight:600; text-transform:uppercase;
               letter-spacing:.05em; margin-bottom:10px; }
@@ -28,93 +28,195 @@
   button:hover { background:#2e3546; }
   button.devtools { background:#1d4ed3; border-color:#2563eb; font-weight:600; }
   button.devtools:hover { background:#2563eb; }
-  .guide { color:var(--dim); font-size:13px; line-height:1.8; }
-  .guide b { color:var(--fg); }
-  .guide .step { color:var(--amber); font-weight:600; margin-right:4px; }
-  .empty { color:var(--dim); text-align:center; padding:24px; font-size:13px; }
+  .m { font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+  .method { font-weight:600; }
+  .GET { color:var(--green); } .POST { color:var(--amber); }
+  .PUT,.DELETE,.PATCH { color:var(--red); }
+  .s2 { color:var(--green); font-weight:600; } .s4,.s5 { color:var(--red); font-weight:600; }
+  .netrow { cursor:pointer; }
+  .detail { white-space:pre-wrap; word-break:break-all; background:#12151b;
+            border:1px solid var(--line); border-radius:8px; padding:10px;
+            font-family:ui-monospace,Menlo,monospace; font-size:11.5px;
+            max-height:280px; overflow:auto; margin-bottom:10px; display:none; }
+  .console-line { font-family:ui-monospace,Menlo,monospace; font-size:12px;
+                  padding:2px 0; border-bottom:1px dashed #222631; word-break:break-all; }
+  .lv-error { color:var(--red); } .lv-warn { color:var(--amber); }
+  .lv-info { color:var(--blue); } .lv-log { color:var(--fg); }
+  #repl-in { width:calc(100% - 70px); background:#12151b; color:var(--fg);
+             border:1px solid var(--line); border-radius:6px; padding:6px 10px;
+             font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+  .flex-tabs { display:flex; gap:6px; margin-bottom:10px; }
+  .flex-tabs button.active { background:#1d4ed3; border-color:#2563eb; }
+  #net-body, #console-body { max-height:340px; overflow:auto; }
+  .pill { font-size:10px; padding:1px 7px; border-radius:8px;
+          background:#232937; color:var(--dim); margin-left:6px; }
 </style>
 </head>
 <body>
-<h1>微信小程序 DevTools 控制台</h1>
-<div class="sub">任意小程序 · Chrome DevTools · 一键启动</div>
+<h1>微信小程序 DevTools <span class="pill">4.1.13</span></h1>
+<div class="sub">vConsole · Chrome DevTools · 网络捕获 · Service REPL — 全自动</div>
 
 <div class="row">
-  <span class="status-dot" id="dot-sniper"></span><span class="tag" id="t-sniper">Sniper</span>
-  <span class="status-dot" id="dot-gateway"></span><span class="tag" id="t-gateway">Gateway</span>
-  <span class="status-dot" id="dot-bridge"></span><span class="tag" id="t-bridge">调试桥</span>
-  <span style="flex:1"></span>
-  <button onclick="refresh()">刷新</button>
-</div>
-
-<div class="panel" id="guide-panel">
-  <h2>快速开始</h2>
-  <div class="guide" id="guide">
-    <span class="step">①</span> 打开<b>微信开发者工具</b>，选择任意有权限的项目，点击<b>真机调试</b><br>
-    <span class="step">②</span> 等待调试面板出现后，回到此页面点击<b>刷新</b><br>
-    <span class="step">③</span> 在微信中打开你要调试的<b>任意小程序</b><br>
-    <span class="step">④</span> 下方列表中找到它，点击<b>DevTools</b>按钮
-  </div>
+  <span class="tag"><span class="status-dot" id="dot-sniper"></span>sniper</span>
+  <span class="tag"><span class="status-dot" id="dot-gateway"></span>gateway</span>
+  <span class="tag"><span class="status-dot" id="dot-sess"></span>service</span>
+  <span class="tag" id="bridge-tag">bridge: ?</span>
 </div>
 
 <div class="panel">
-  <h2>可调试的小程序 / 页面</h2>
+  <h2>小程序目标</h2>
   <table>
     <thead><tr><th>AppID</th><th>URL</th><th></th></tr></thead>
     <tbody id="targets"></tbody>
   </table>
-  <div class="empty" id="no-targets" style="display:none">
-    暂无可调试目标 — 请先完成上方步骤
+  <div class="sub" id="targets-empty" style="display:none">
+    没有发现小程序。在微信开发者工具发起真机调试，然后在微信中打开任意小程序。
   </div>
 </div>
 
-<script>
-let state = {};
+<div class="panel">
+  <h2>网络请求 <span class="pill" id="net-count">0</span></h2>
+  <div class="detail" id="net-detail"></div>
+  <div id="net-body">
+    <table>
+      <thead><tr><th style="width:52px">方法</th><th>URL</th><th style="width:110px">状态</th><th style="width:90px">来源</th></tr></thead>
+      <tbody id="net-rows"></tbody>
+    </table>
+  </div>
+</div>
 
-async function refresh() {
+<div class="panel">
+  <h2>Service 控制台 / REPL</h2>
+  <div style="margin-bottom:10px">
+    <input id="repl-in" placeholder='在小程序 service 层执行 JS，如: typeof wx.request ｜  __REA__.events.length ｜  getApp().route' />
+    <button onclick="sendEval()">执行</button>
+  </div>
+  <div id="console-body"></div>
+</div>
+
+<script>
+let netEvents = [];
+let consoleLines = [];
+const NET_MAX = 300, CON_MAX = 200;
+
+function dot(id, on) {
+  const el = document.getElementById(id);
+  el.className = 'status-dot ' + (on ? 'on' : 'off');
+}
+
+function renderTargets(data) {
+  dot('dot-sniper', data.sniper); dot('dot-gateway', data.gateway);
+  dot('dot-sess', data.sess);
+  document.getElementById('bridge-tag').textContent =
+    'bridge: ' + (data.bridge || '未连接');
+  const tb = document.getElementById('targets');
+  tb.innerHTML = '';
+  const list = (data.targets || []).filter(t => t.appid !== 'H5');
+  document.getElementById('targets-empty').style.display =
+    list.length ? 'none' : 'block';
+  for (const t of list) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="m">${t.appid}</td>
+      <td class="m" style="color:var(--dim)">${t.url}</td>
+      <td><button class="devtools" onclick="openDevtools('${t.targetId}')">DevTools</button></td>`;
+    tb.appendChild(tr);
+  }
+}
+
+function openDevtools(tid) {
+  fetch('/api/open_devtools?target_id=' + tid);
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function renderNet() {
+  document.getElementById('net-count').textContent = netEvents.length;
+  const tb = document.getElementById('net-rows');
+  tb.innerHTML = '';
+  const recent = netEvents.slice(-100).reverse();
+  for (const e of recent) {
+    const d = e.data || {};
+    if (e.type !== 'request' && e.type !== 'response') continue;
+    const tr = document.createElement('tr');
+    tr.className = 'netrow';
+    if (e.type === 'request') {
+      tr.innerHTML = `<td class="m method ${esc(d.method)}">${esc(d.method)}</td>
+        <td class="m">${esc(d.url || '')}</td>
+        <td class="m" style="color:var(--dim)">…</td>
+        <td class="m" style="color:var(--dim)">${esc((e.appid||'').slice(0,10))}</td>`;
+    } else {
+      const st = d.status || 0;
+      tr.innerHTML = `<td class="m" style="color:var(--dim)">↳ ${esc(d.api||'')}</td>
+        <td class="m" style="color:var(--dim)">${esc(d.url || '')}</td>
+        <td class="m s${String(st)[0]}">${st}</td>
+        <td class="m" style="color:var(--dim)">${esc((e.appid||'').slice(0,10))}</td>`;
+    }
+    tr.onclick = () => showDetail(e);
+    tb.appendChild(tr);
+  }
+}
+
+function showDetail(e) {
+  const el = document.getElementById('net-detail');
+  el.style.display = 'block';
+  el.textContent = JSON.stringify(e, null, 1);
+}
+
+function renderConsole() {
+  const body = document.getElementById('console-body');
+  body.innerHTML = consoleLines.slice(-60).map(l => {
+    const cls = 'console-line lv-' + esc(l.level || 'log');
+    return `<div class="${cls}">${esc(l.text)}</div>`;
+  }).join('');
+  body.scrollTop = body.scrollHeight;
+}
+
+function sendEval() {
+  const code = document.getElementById('repl-in').value.trim();
+  if (!code) return;
+  fetch('/api/eval?code=' + encodeURIComponent(code));
+  consoleLines.push({level:'info', text: '» ' + code});
+  renderConsole();
+}
+
+document.getElementById('repl-in').addEventListener('keydown', e => {
+  if (e.key === 'Enter') sendEval();
+});
+
+function ingestEvents(events) {
+  for (const e of events) {
+    if (e.type === 'request' || e.type === 'response' || e.type === 'fail') {
+      netEvents.push(e);
+      if (netEvents.length > NET_MAX) netEvents.shift();
+    } else if (e.type === 'console') {
+      const d = e.data || {};
+      consoleLines.push({level: d.level || 'log',
+                         text: (d.args || []).join(' ')});
+      if (consoleLines.length > CON_MAX) consoleLines.shift();
+    } else if (e.type === 'eval_result' || e.type === 'error') {
+      consoleLines.push({level: 'info', text: '⇐ ' + (e.data ?? '')});
+      if (consoleLines.length > CON_MAX) consoleLines.shift();
+    }
+  }
+}
+
+async function poll() {
   try {
     const r = await fetch('/api/status');
-    state = await r.json();
-    render();
-  } catch(e) {
-    console.error(e);
-  }
+    renderTargets(await r.json());
+    const r2 = await fetch('/api/events');
+    const evs = await r2.json();
+    if (Array.isArray(evs) && evs.length) {
+      ingestEvents(evs);
+      renderNet(); renderConsole();
+    }
+  } catch (e) { /* server restarting */ }
 }
-
-function render() {
-  const dot = (id, on) => {
-    const el = document.getElementById(id);
-    if (el) el.className = 'status-dot ' + (on ? 'on' : 'off');
-  };
-  dot('dot-sniper', state.sniper);
-  dot('dot-gateway', state.gateway);
-  dot('dot-bridge', !!state.bridge);
-  document.getElementById('t-sniper').textContent = 'Sniper' + (state.sniper ? ' ✓' : ' ✗');
-  document.getElementById('t-gateway').textContent = 'Gateway' + (state.gateway ? ' ✓' : ' ✗');
-  document.getElementById('t-bridge').textContent = state.bridge ? '桥 :' + state.bridge : '桥 ✗';
-
-  const tb = document.getElementById('targets');
-  const targets = state.targets || [];
-  document.getElementById('no-targets').style.display = targets.length ? 'none' : 'block';
-  tb.innerHTML = targets.map(t => `<tr>
-    <td style="font-family:monospace;font-size:12px;color:${t.appid === 'H5' ? 'var(--amber)' : 'var(--green)'}">${t.appid}</td>
-    <td style="font-size:12px;color:var(--dim);max-width:400px;overflow:hidden;text-overflow:ellipsis">${t.url}</td>
-    <td><button class="devtools" onclick="openDevtools('${t.targetId}')">DevTools</button></td>
-  </tr>`).join('');
-
-  // hide guide when bridge is up and targets exist
-  if (state.bridge && targets.length > 0) {
-    document.getElementById('guide-panel').style.display = 'none';
-  } else {
-    document.getElementById('guide-panel').style.display = '';
-  }
-}
-
-async function openDevtools(tid) {
-  await fetch('/api/open_devtools?target_id=' + tid);
-}
-
-setInterval(refresh, 3000);
-refresh();
+poll();
+setInterval(poll, 2000);
 </script>
 </body>
 </html>

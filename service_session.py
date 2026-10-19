@@ -37,6 +37,7 @@ CTRL_PORT = 8778
 
 MP = {}            # appid -> {sid, ctx, scripts, paused, topFrame, bps, fails}
 TARGETS_CACHE = []
+ONLINE = {}        # appid -> last heartbeat/event ts (agent hub, no bridge)
 ws_ref = {}
 _loop = None
 _ctrl_queue = None  # asyncio.Queue of (req, done_event, result_box)
@@ -230,6 +231,10 @@ async def refresh_ctx(br, v):
 async def poll_agent(br, appid):
     """True=ok, False=should drop (after 3 consecutive failures)."""
     v = MP[appid]
+    # primary path: agent pushes via hub — no bridge traffic needed
+    if ONLINE.get(appid, 0) > time.time() - 30:
+        v["fails"] = 0
+        return True
     try:
         raw = await eval_js(
             br, v["sid"], v["ctx"],
@@ -476,6 +481,36 @@ class CtrlHandler(BaseHTTPRequestHandler):
             self._json({})
 
 
+async def agent_hub(ws):
+    """Direct agent connections (wx.connectSocket) — bridge-independent
+    event push. This is the primary capture path; bridge polling is only
+    a fallback."""
+    m = re.match(r"/agent\?appid=(wx[0-9a-f]{16})", ws.path or "")
+    if not m:
+        await ws.close()
+        return
+    appid = m.group(1)
+    ONLINE[appid] = time.time()
+    print(f"[hub] agent online: {appid}", flush=True)
+    emit({"t": time.time(), "appid": appid, "type": "agent_online",
+          "data": {}})
+    try:
+        async for raw in ws:
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            ONLINE[appid] = time.time()
+            if msg.get("hb"):
+                continue
+            for e in msg.get("events", [])[:500]:
+                if isinstance(e, dict):
+                    emit({**e, "t": time.time(), "appid": appid})
+    finally:
+        print(f"[hub] agent offline: {appid}", flush=True)
+        ONLINE[appid] = 0
+
+
 async def run_session(port):
     async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=3,
                                   max_size=2**24) as ws:
@@ -538,6 +573,8 @@ async def main():
 
     server = ThreadingHTTPServer(("127.0.0.1", CTRL_PORT), CtrlHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    await websockets.serve(agent_hub, "127.0.0.1", 8779,
+                           max_size=2**22)
 
     while True:
         port = find_port()

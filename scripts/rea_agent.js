@@ -11,13 +11,15 @@
 //   __REA__.drain(n)       -> events array (and clears)
 (function () {
   if (typeof globalThis.__REA__ !== 'undefined' &&
-      globalThis.__REA__.version >= 3) return;
+      globalThis.__REA__.version >= 4) return;
 
   var events = [];
   var MAX = 3000;
   function report(type, data) {
     if (events.length >= MAX) events.splice(0, events.length - MAX);
-    events.push({ t: Date.now(), type: type, data: data });
+    var e = { t: Date.now(), type: type, data: data };
+    events.push(e);
+    __REA__.push([e]);          // live push (no-op until v4 object exists)
   }
 
   function shallow(x, n) {
@@ -131,8 +133,47 @@
     wx.onError(function (msg) { report('error', { msg: shallow(msg, 2000) }); });
   } catch (e) { }
 
+  // ---- direct push hub (wx.connectSocket -> local agent hub) ----
+  var sock = null, sockOpen = false, backoff = 2000;
+  var APPID = '';
+  try {
+    var cfg = typeof __wxConfig !== 'undefined' && __wxConfig;
+    APPID = (cfg && (cfg.appId || cfg.accountInfo &&
+             cfg.accountInfo.appId)) || 'unknown';
+  } catch (e) {}
+  function connectHub() {
+    try {
+      sock = wx.connectSocket({
+        url: 'ws://127.0.0.1:8779/agent?appid=' + APPID });
+      sock.onOpen(function () { sockOpen = true; backoff = 2000; flush(); });
+      sock.onClose(function () { sockOpen = false; retry(); });
+      sock.onError(function () { sockOpen = false; retry(); });
+      sock.onMessage(function () {});
+    } catch (e) { setTimeout(connectHub, backoff); }
+  }
+  function retry() {
+    setTimeout(connectHub, backoff);
+    backoff = Math.min(backoff * 2, 30000);
+  }
+  function flush() {
+    if (!sockOpen || !events.length) return;
+    try { sock.send({ data: JSON.stringify({ events: events.splice(0, 500) }) }); }
+    catch (e) {}
+  }
+  setInterval(flush, 1000);
+  setInterval(function () {
+    if (sockOpen) { try { sock.send({ data: '{"hb":1}' }); } catch (e) {} }
+  }, 10000);
+  connectHub();
+
   globalThis.__REA__ = {
-    events: events, version: 3, boot: Date.now(),
+    events: events, version: 4, boot: Date.now(),
+    push: function (batch) {
+      if (sockOpen && sock) {
+        try { sock.send({ data: JSON.stringify({ events: batch }) }); }
+        catch (e) {}
+      }
+    },
     dumpStorage: function () {
       try {
         var info = wx.getStorageInfoSync();

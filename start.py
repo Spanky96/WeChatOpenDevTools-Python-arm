@@ -202,7 +202,7 @@ class Handler(BaseHTTPRequestHandler):
                 for fn in os.listdir(srcdir):
                     if fn.endswith(".js"):
                         files.append(fn)
-            else:
+            if not files:
                 outdir = ensure_unpacked(appid)
                 for dirpath, _dirnames, filenames in os.walk(outdir):
                     for fn in filenames:
@@ -210,6 +210,19 @@ class Handler(BaseHTTPRequestHandler):
                             rel = os.path.relpath(os.path.join(dirpath, fn),
                                                   outdir)
                             files.append(rel)
+            if not files:
+                # no local package either — pull runtime sources via daemon
+                try:
+                    import urllib.request
+                    r = urllib.request.urlopen(urllib.request.Request(
+                        "http://127.0.0.1:8778/fetch_source",
+                        data=json.dumps({"appid": appid}).encode(),
+                        headers={"Content-Type": "application/json"}),
+                        timeout=30)
+                    for fn in (json.loads(r.read()) or {}).get("saved", []):
+                        files.append(fn)
+                except Exception:
+                    pass
             files.sort()
             self._json({"appid": appid, "files": files[:400]})
         elif path == "/api/source":

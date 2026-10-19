@@ -349,7 +349,10 @@ async def ensure_debugger(br, v):
     ok = isinstance(r, dict) and "debuggerId" in r
     if ok:
         v["dbg"] = True
-        await asyncio.sleep(0.6)   # let scriptParsed arrive
+        for _ in range(5):          # scriptParsed can take seconds
+            if v["scripts"]:
+                break
+            await asyncio.sleep(0.8)
         print(f"[sess] debugger enabled on demand "
               f"({len(v['scripts'])} scripts)", flush=True)
     return ok
@@ -397,6 +400,33 @@ async def process_ctrl(br, req):
             r = await br.cmd(method, v["sid"], timeout=6)
             return {"ok": isinstance(r, dict) and "_err" not in r and
                           "error" not in r, "raw": r}
+        if req.get("path") == "/fetch_source":
+            if not await ensure_debugger(br, v):
+                return {"error": "Debugger.enable failed"}
+            for _ in range(6):
+                if v["scripts"]:
+                    break
+                await asyncio.sleep(0.8)
+            srcdir = f"/tmp/wechat_rea/src_{appid}"
+            os.makedirs(srcdir, exist_ok=True)
+            saved = []
+            for surl, sid_script in list(v["scripts"].items())[:8]:
+                fname = surl.replace("https://", "").replace("usr/", "") \
+                            .replace("/", "_") or "script.js"
+                try:
+                    r3 = await br.cmd("Debugger.getScriptSource", v["sid"],
+                                      scriptId=sid_script, timeout=25)
+                    body = (r3 or {}).get("scriptSource") \
+                        if isinstance(r3, dict) else None
+                    if body:
+                        with open(os.path.join(srcdir, fname), "w",
+                                  encoding="utf-8") as f:
+                            f.write(body)
+                        saved.append(fname)
+                except Exception:
+                    pass
+            return {"ok": True, "saved": saved}
+
         if req.get("path") == "/eval":
             code = req.get("code", "")
             if not code:

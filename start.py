@@ -32,12 +32,14 @@ _children = {}
 
 
 def spawn(name, script, *args):
-    """Start a child process if not already running."""
+    """Start a child process if not already running (logs to files)."""
     if name in _children and _children[name].poll() is None:
         return False
     cmd = [sys.executable, "-u", os.path.join(ROOT, script)] + list(args)
+    os.makedirs("/tmp/wechat_rea", exist_ok=True)
+    logf = open(f"/tmp/wechat_rea/managed_{name}.log", "a", buffering=1)
     _children[name] = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        cmd, stdout=logf, stderr=subprocess.STDOUT,
         cwd=ROOT, start_new_session=True)
     return True
 

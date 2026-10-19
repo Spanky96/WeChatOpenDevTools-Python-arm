@@ -33,12 +33,13 @@ EVENTS = "/tmp/wechat_rea/service_events.jsonl"
 EVAL_FILE = "/tmp/wechat_rea/service_eval"
 STORAGE_REQ = "/tmp/wechat_rea/service_storage_req"
 STORAGE_RESP = "/tmp/wechat_rea/service_storage_resp"
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CTRL_PORT = 8778
 
 MP = {}            # appid -> {sid, ctx, scripts, paused, topFrame, bps, fails}
 TARGETS_CACHE = []
 ONLINE = {}        # appid -> last heartbeat/event ts (agent hub, no bridge)
+BRIDGE = {"state": "connecting", "port": None}   # connecting|up|dead
 FAILED_CTX = {}    # appid -> ts of last ctx-discovery failure (cooldown)
 ws_ref = {}
 _loop = None
@@ -548,7 +549,9 @@ class CtrlHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] == "/status":
-            self._json({"targets": [{"appid": (re.search(r"(wx[0-9a-f]{16})", t.get("url", "")) or [None, None])[1],
+            self._json({"bridge_state": BRIDGE["state"],
+                        "bridge_port": BRIDGE["port"],
+                        "targets": [{"appid": (re.search(r"(wx[0-9a-f]{16})", t.get("url", "")) or [None, None])[1],
                                      "url": t.get("url", "")[:90],
                                      "targetId": t.get("targetId")}
                                     for t in TARGETS_CACHE
@@ -594,12 +597,14 @@ async def agent_hub(ws):
 
 
 async def run_session(port):
+    BRIDGE["state"], BRIDGE["port"] = "connecting", port
     async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=3,
                                   max_size=2**24) as ws:
         br = Br(ws)
         await br.start()
         ctrl_task = asyncio.create_task(ctrl_loop(br))
         stale_cycles = 0
+        BRIDGE["state"] = "up"
         try:
             while True:
                 await setup_targets(br)
@@ -629,6 +634,7 @@ async def run_session(port):
                         break
         finally:
             ctrl_task.cancel()
+            BRIDGE["state"] = "dead"
 
 
 async def main():

@@ -77,7 +77,8 @@ async def get_targets_cached():
         with urllib.request.urlopen("http://127.0.0.1:8778/status",
                                     timeout=3) as r:
             st = json.loads(r.read())
-        data = {"bridge": find_bridge_port(),
+        data = {"bridge": st.get("bridge_port") or find_bridge_port(),
+                "bridge_state": st.get("bridge_state", "?"),
                 "targets": [t for t in st.get("targets", [])
                             if t.get("appid")]}
         if not data["targets"]:
@@ -254,10 +255,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json({"ok": False, "error": "no target_id"})
         elif path == "/api/start_sniper":
-            ok = spawn("sniper", "sniper.py")
+            ok = spawn("sniper", "services/sniper.py")
             self._json({"ok": True, "started": ok})
         elif path == "/api/start_gateway":
-            ok = spawn("gateway", "cdp_gateway.py")
+            ok = spawn("gateway", "services/cdp_gateway.py")
             self._json({"ok": True, "started": ok})
         elif path == "/":
             with open(os.path.join(WEB_DIR, "dashboard.html"), "rb") as f:
@@ -298,7 +299,7 @@ def ensure_unpacked(appid):
             os.path.exists(os.path.join(outdir, "app-service.js")):
         return outdir
     try:
-        subprocess.run([sys.executable, "-u", os.path.join(ROOT, "unpack_mp.py"),
+        subprocess.run([sys.executable, "-u", os.path.join(ROOT, "services", "unpack_mp.py"),
                         appid, outdir],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        cwd=ROOT, timeout=60)
@@ -344,9 +345,9 @@ def read_source(appid, fname):
 def auto_manage():
     """Background thread: keep sniper, gateway and service session running."""
     while True:
-        spawn("sniper", "sniper.py")
-        spawn("gateway", "cdp_gateway.py")
-        spawn("sess", "service_session.py")
+        spawn("sniper", "services/sniper.py")
+        spawn("gateway", "services/cdp_gateway.py")
+        spawn("sess", "services/service_session.py")
         time.sleep(5)
 
 

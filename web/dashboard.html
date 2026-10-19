@@ -509,11 +509,17 @@ async function poll(){
     const r=await fetch('/api/status');const st=await r.json();
     dot('d-sniper',st.sniper);dot('d-gateway',st.gateway);dot('d-sess',st.sess);
     const bt=document.getElementById('bridge-tag');
-    bt.textContent='桥: '+(st.bridge||'未连接');
-    if(st.bridge && (!st.targets||!st.targets.length)){
-      bt.textContent='桥已失效(无目标) — 请重新发起真机调试';
+    const bs=st.bridge_state||'?';
+    if(bs==='up'){
+      bt.textContent='桥: '+(st.bridge||'?')+' (正常)';
+      bt.style.color='';
+    } else if(bs==='connecting'){
+      bt.textContent='桥连接中… (寻找端口/若无反应请重新发起真机调试)';
+      bt.style.color='var(--amber)';
+    } else {
+      bt.textContent='桥未连接 — 请发起真机调试';
       bt.style.color='var(--red)';
-    } else bt.style.color='';
+    }
     renderApps(st.targets);
     const r2=await fetch('/api/events?since='+state.lastT);
     const evs=await r2.json();

@@ -198,7 +198,7 @@ let state = {
   net: {}, con: {}, netSel: null,
   srcLines: null, srcFormatted: null, formatted: false,
   srcFile: null, bps: new Set(), paused: {},
-  lastT: 0,
+  lastT: Date.now()/1000 - 2,   // only events from this dashboard session
 };
 function dot(id,on){document.getElementById(id).className='dot '+(on?'on':'off');}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}

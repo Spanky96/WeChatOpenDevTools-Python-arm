@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Mini-program service-layer debug session (v3: real breakpoints).
+"""Mini-program service-layer debug session (v3.1).
 
-One WebSocket to the WeChat remote-debug bridge. For each mini-program
-page target, finds the SERVICE context (`typeof wx === 'object'`),
-injects scripts/rea_agent.js, enables the Debugger domain, and serves an
-HTTP control API on :8778:
+One WebSocket to the WeChat remote-debug bridge. Per mini-program page
+target: finds the SERVICE context (`typeof wx === 'object'`), injects
+scripts/rea_agent.js, enables the Debugger domain, fetches runtime
+sources (exact line numbers). Serves an HTTP control API on :8778:
 
-  GET  /status                      appids, scripts, paused state
-  POST /breakpoint  {appid,file,line,remove}
-  POST /control     {appid,action}  resume|stepOver|stepInto|stepOut
-  POST /eval        {appid,code}    evaluate (call frame when paused)
-  GET  /events?since=TS             events after timestamp
+  GET  /status                       appids / scripts / paused
+  POST /breakpoint {appid,file,line,remove}
+  POST /control    {appid,action}    resume|stepOver|stepInto|stepOut
+  POST /eval       {appid,code}      evaluate (call frame when paused)
 
-Agent events + debugger pauses are appended to
-/tmp/wechat_rea/service_events.jsonl.
+Events are appended to /tmp/wechat_rea/service_events.jsonl, which is
+rotated at startup (each debug session starts clean).
 """
 import asyncio
 import glob
 import json
 import os
 import re
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -34,9 +34,10 @@ STORAGE_RESP = "/tmp/wechat_rea/service_storage_resp"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CTRL_PORT = 8778
 
-# ---------------- shared state (single asyncio loop) ----------------
-MP = {}          # appid -> {sid, ctx, scripts:{url:scriptId}, paused:{...}}
-ws_ref = {}      # the live bridge websocket
+MP = {}            # appid -> {sid, ctx, scripts, paused, topFrame, bps, fails}
+ws_ref = {}
+_loop = None
+_ctrl_queue = None  # asyncio.Queue of (req, done_event, result_box)
 
 
 def emit(rec):
@@ -77,31 +78,29 @@ class Br:
                 elif m.get("method", "").startswith("Debugger."):
                     await self._on_event(m)
                 else:
-                    self.buf.append(m)   # contexts etc. for drain()
+                    self.buf.append(m)
         except Exception:
             pass
 
     async def _on_event(self, m):
-        """Background events: scriptParsed, paused, console, etc."""
         sid = m.get("sessionId")
-        method = m.get("method", "")
         appid = next((a for a, v in MP.items() if v["sid"] == sid), None)
         if not appid:
             return
         p = m.get("params", {})
+        method = m.get("method", "")
         if method == "Debugger.scriptParsed":
             url = p.get("url", "")
             if url:
                 MP[appid]["scripts"][url] = p.get("scriptId")
         elif method == "Debugger.paused":
+            url_by_id = {sid_: u for u, sid_ in MP[appid]["scripts"].items()}
             frames = []
-            script_url = {sid_: u for u, sid_ in
-                          MP[appid]["scripts"].items()}
             for fr in p.get("callFrames", [])[:12]:
                 loc = fr.get("location", {})
                 frames.append({
                     "fn": fr.get("functionName") or "(anonymous)",
-                    "url": script_url.get(loc.get("scriptId"), ""),
+                    "url": url_by_id.get(loc.get("scriptId"), ""),
                     "line": loc.get("lineNumber", -1) + 1,
                     "col": loc.get("columnNumber", 0),
                     "cf": fr.get("callFrameId", ""),
@@ -110,13 +109,13 @@ class Br:
                                    "reason": p.get("reason", "")}
             MP[appid]["topFrame"] = frames[0]["cf"] if frames else None
             emit({"t": time.time(), "appid": appid, "type": "paused",
-                  "data": {"reason": p.get("reason"), "frames": frames}})
+                  "data": MP[appid]["paused"]})
         elif method == "Debugger.resumed":
             MP[appid]["paused"] = None
             emit({"t": time.time(), "appid": appid, "type": "resumed",
                   "data": {}})
 
-    async def cmd(self, method, sid=None, timeout=6, **params):
+    async def cmd(self, method, sid=None, timeout=8, **params):
         self._id += 1
         mid = self._id
         fut = asyncio.get_event_loop().create_future()
@@ -164,9 +163,11 @@ async def setup_targets(br):
              if t["type"] == "page" and "servicewechat.com/wx" in
              t.get("url", "")]
     agent = open(os.path.join(ROOT, "scripts", "rea_agent.js")).read()
+    seen = set()
     for t in pages:
         am = re.search(r"(wx[0-9a-f]{16})", t.get("url", ""))
         appid = am.group(1) if am else "?"
+        seen.add(appid)
         if appid in MP:
             continue
         a = await br.cmd("Target.attachToTarget", targetId=t["targetId"],
@@ -174,84 +175,55 @@ async def setup_targets(br):
         sid = a.get("sessionId") if isinstance(a, dict) else None
         if not sid:
             continue
-        # service context
         await br.cmd("Runtime.enable", sid)
         evs = await br.drain(1.2)
         ctxs = [e["params"]["context"] for e in evs
                 if e.get("method") == "Runtime.executionContextCreated"]
         svc = None
         for c in ctxs:
-            if await eval_js(br, sid, c.get("id"), "typeof wx") == "object":
+            if await eval_js(br, sid, c.get("id"), "typeof wx",
+                             timeout=4) == "object":
                 svc = c.get("id")
                 break
         if svc is None:
             print(f"[sess] {appid}: no service ctx", flush=True)
             continue
-        has = await eval_js(br, sid, svc, "typeof __REA__")
+        has = await eval_js(br, sid, svc, "typeof __REA__", timeout=4)
         if has != "object":
             await eval_js(br, sid, svc, agent, timeout=12)
             print(f"[sess] agent injected -> {appid}", flush=True)
-        # register BEFORE Debugger.enable so scriptParsed lands in MP
+        # NOTE: Debugger.enable stays OFF by default — enabling it on the
+        # service context stalls live event capture (observed 2026-10-19).
+        # It is enabled on demand by the first /breakpoint request.
         MP[appid] = {"sid": sid, "ctx": svc, "scripts": {}, "paused": None,
-                     "topFrame": None, "bps": {}}
-        # debugger domain — gives scriptParsed + real breakpoints
-        r2 = await br.cmd("Debugger.enable", sid, timeout=5)
-        ok = isinstance(r2, dict) and "debuggerId" in r2
-        await asyncio.sleep(0.5)  # let scriptParsed events arrive
-        print(f"[sess] {appid}: ctx={svc} debugger={'on' if ok else 'FAIL'} "
-              f"scripts={len(MP[appid]['scripts'])}", flush=True)
+                     "topFrame": None, "bps": {}, "fails": 0,
+                     "dbg": False}
         emit({"t": time.time(), "appid": appid, "type": "attached",
-              "data": {"debugger": bool(ok),
-                       "scripts": list(MP[appid]["scripts"].keys())[:10]}})
-        # fetch runtime sources — line numbers then match the script
-        # EXACTLY (local unpacked packages are a different build!)
-        srcdir = f"/tmp/wechat_rea/src_{appid}"
-        os.makedirs(srcdir, exist_ok=True)
-        for surl, sid_script in list(MP[appid]["scripts"].items())[:6]:
-            fname = surl.replace("https://", "").replace("usr/", "") \
-                        .replace("/", "_") or "script.js"
-            try:
-                r3 = await br.cmd("Debugger.getScriptSource", sid,
-                                  scriptId=sid_script, timeout=25)
-                src = (r3 or {}).get("scriptSource") if isinstance(r3, dict) \
-                    else None
-                if src:
-                    with open(os.path.join(srcdir, fname), "w",
-                              encoding="utf-8") as f:
-                        f.write(src)
-                    emit({"t": time.time(), "appid": appid,
-                          "type": "source_saved",
-                          "data": {"file": fname, "lines":
-                                   src.count("\n") + 1}})
-            except Exception as exc:
-                print(f"[sess] getScriptSource {fname}: {exc}", flush=True)
-    # drop dead appids
-    live = {a for a in MP}
-    seen = set()
-    r = await br.cmd("Target.getTargets")
-    for t in r.get("targetInfos", []):
-        am = re.search(r"(wx[0-9a-f]{16})", t.get("url", ""))
-        if am:
-            seen.add(am.group(1))
-    for a in live - seen:
+              "data": {"debugger": False}})
+    for a in [a for a in MP if a not in seen]:
         print(f"[sess] {a} gone", flush=True)
         del MP[a]
 
 
 async def poll_agent(br, appid):
+    """True=ok, False=should drop (after 3 consecutive failures)."""
     v = MP[appid]
     try:
         raw = await eval_js(
             br, v["sid"], v["ctx"],
             "(function(){if(typeof __REA__!=='object')return 'DEAD';"
             "if(!__REA__.drain)return 'V1';"
-            "return JSON.stringify(__REA__.drain(200))})()")
+            "return JSON.stringify(__REA__.drain(200))})()", timeout=6)
         if raw == "DEAD":
-            return False
+            v["fails"] += 1
+            if v["fails"] >= 3:
+                return False
+            return True
+        v["fails"] = 0
         if raw == "V1":
             raw = await eval_js(
                 br, v["sid"], v["ctx"],
-                "JSON.stringify(__REA__.events.splice(0,200))")
+                "JSON.stringify(__REA__.events.splice(0,200))", timeout=6)
         events = json.loads(raw) if isinstance(raw, str) else []
         for e in events if isinstance(events, list) else []:
             if isinstance(e, dict):
@@ -262,69 +234,119 @@ async def poll_agent(br, appid):
                 print(f"[{appid[:10]}] {str(e.get('type')):9} "
                       f"{str(head)[:70]}", flush=True)
     except Exception as exc:
+        v["fails"] += 1
         print(f"[sess] poll {appid}: {type(exc).__name__} "
-              f"{str(exc)[:50]}", flush=True)
-        return False
+              f"({v['fails']})", flush=True)
+        if v["fails"] >= 3:
+            return False
     return True
 
 
-# ---------------- HTTP control API ----------------
-class CtrlHandler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
+# ---------------- control processing (fast queue) ----------------
+async def ensure_debugger(br, v):
+    """Enable Debugger on demand (first breakpoint). Keeps scriptParsed
+    registry; does NOT pull sources (the 5MB transfer is hard on the
+    bridge — cached files from earlier sessions serve source viewing)."""
+    if v["dbg"]:
+        return True
+    r = await br.cmd("Debugger.enable", v["sid"], timeout=6)
+    ok = isinstance(r, dict) and "debuggerId" in r
+    if ok:
+        v["dbg"] = True
+        await asyncio.sleep(0.6)   # let scriptParsed arrive
+        print(f"[sess] debugger enabled on demand "
+              f"({len(v['scripts'])} scripts)", flush=True)
+    return ok
 
-    def _json(self, obj):
-        body = json.dumps(obj).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def do_POST(self):
-        path = self.path.split("?")[0]
+async def process_ctrl(br, req):
+    appid = req.get("appid")
+    v = MP.get(appid)
+    if v is None:
+        return {"error": f"appid 未连接 (当前: {list(MP) or '无'}) — "
+                         "等小程序出现在列表中再试"}
+    try:
+        if req.get("path") == "/breakpoint":
+            line = int(req.get("line", 0))
+            f = req.get("file", "app-service.js")
+            url = ("https://usr/" + f) if "/" not in f else f
+            v.setdefault("bps", {})
+            if req.get("remove"):
+                bpid = v["bps"].pop(f"{f}:{line}", None)
+                if not bpid:
+                    return {"ok": False, "error": "no such breakpoint"}
+                r = await br.cmd("Debugger.removeBreakpoint", v["sid"],
+                                 breakpointId=bpid, timeout=8)
+                return {"ok": True, "removed": bpid}
+            if not await ensure_debugger(br, v):
+                return {"ok": False,
+                        "error": "Debugger.enable failed (bridge)"}
+            r = await br.cmd("Debugger.setBreakpointByUrl", v["sid"],
+                             lineNumber=max(0, line - 1), url=url,
+                             columnNumber=0, timeout=8)
+            bpid = (r or {}).get("breakpointId")
+            if bpid:
+                v["bps"][f"{f}:{line}"] = bpid
+            return {"ok": bool(bpid), "breakpointId": bpid,
+                    "locations": (r or {}).get("locations", []),
+                    "raw": r}
+        if req.get("path") == "/control":
+            action = req.get("action", "resume")
+            method = {"resume": "Debugger.resume",
+                      "stepOver": "Debugger.stepOver",
+                      "stepInto": "Debugger.stepInto",
+                      "stepOut": "Debugger.stepOut"}.get(action)
+            if not method:
+                return {"error": "bad action"}
+            r = await br.cmd(method, v["sid"], timeout=6)
+            return {"ok": isinstance(r, dict) and "_err" not in r and
+                          "error" not in r, "raw": r}
+        if req.get("path") == "/eval":
+            code = req.get("code", "")
+            if not code:
+                return {"error": "no code"}
+            if v.get("paused") and v.get("topFrame"):
+                r = await br.cmd("Debugger.evaluateOnCallFrame", v["sid"],
+                                 callFrameId=v["topFrame"],
+                                 expression=code, returnByValue=True,
+                                 silent=True, timeout=10)
+                val = ((r or {}).get("result") or {}).get("value")
+                if isinstance(r, dict) and "_err" in r:
+                    return {"ok": False, "frame": True,
+                            "value": str(r.get("_err"))}
+                return {"ok": True, "frame": True, "value": val}
+            val = await eval_js(br, v["sid"], v["ctx"],
+                                "(function(){try{var r=(" + code +
+                                ");r=(r===undefined?'undefined':r);"
+                                "return JSON.stringify({ok:true,r:r})}"
+                                "catch(e){return JSON.stringify("
+                                "{ok:false,e:String(e)})}})()", timeout=10)
+            return {"ok": True, "frame": False, "value": val}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    return {"error": "unknown path"}
+
+
+async def ctrl_loop(br):
+    """High-priority consumer of the control queue."""
+    while True:
         try:
-            length = int(self.headers.get("Content-Length", 0))
-            req = json.loads(self.rfile.read(length) or b"{}")
-        except ValueError:
-            req = {}
-        # hand off into the asyncio loop via a pending-command file
-        cmdfile = "/tmp/wechat_rea/sess_ctrl_req"
-        with open(cmdfile, "w") as f:
-            json.dump({"path": path, **req}, f)
-        deadline = time.time() + 6
-        result = None
-        while time.time() < deadline:
-            time.sleep(0.1)
-            try:
-                result = json.loads(
-                    open("/tmp/wechat_rea/sess_ctrl_resp").read())
-                os.remove("/tmp/wechat_rea/sess_ctrl_resp")
-                break
-            except (OSError, ValueError):
-                continue
-        self._json(result or {"error": "session busy / not connected"})
-
-    def do_GET(self):
-        path = self.path.split("?")[0]
-        if path == "/status":
-            self._json({
-                a: {"debugger": bool(v["scripts"] is not None),
-                    "scripts": list(v["scripts"].keys())[:20],
-                    "paused": v["paused"]}
-                for a, v in MP.items()})
-        else:
-            self._json({})
+            item = await asyncio.wait_for(_ctrl_queue.get(), timeout=0.3)
+        except asyncio.TimeoutError:
+            continue
+        req, ev, box = item
+        try:
+            box["result"] = await process_ctrl(br, req)
+        except Exception as exc:
+            box["result"] = {"error": str(exc)}
+        ev.set()
 
 
-async def serve_ctrl_requests(br):
-    """Poll control/eval/storage request files."""
-    req_file = "/tmp/wechat_rea/sess_ctrl_req"
-    resp_file = "/tmp/wechat_rea/sess_ctrl_resp"
-
-    # legacy eval file (start.py /api/eval)
-    if os.path.exists(EVAL_FILE) and MP:
+async def legacy_file_requests(br):
+    """start.py /api/eval and /api/storage file channels."""
+    if not MP:
+        return
+    if os.path.exists(EVAL_FILE):
         try:
             code = open(EVAL_FILE).read().strip()
             os.remove(EVAL_FILE)
@@ -340,9 +362,7 @@ async def serve_ctrl_requests(br):
                 "return JSON.stringify({ok:false,e:String(e)})}})()")
             emit({"t": time.time(), "appid": appid, "type": "eval_result",
                   "data": val})
-
-    # storage dump (start.py /api/storage)
-    if os.path.exists(STORAGE_REQ) and MP:
+    if os.path.exists(STORAGE_REQ):
         try:
             want = open(STORAGE_REQ).read().strip()
             os.remove(STORAGE_REQ)
@@ -353,7 +373,7 @@ async def serve_ctrl_requests(br):
                 if want and appid != want:
                     continue
                 res = await eval_js(br, v["sid"], v["ctx"],
-                                    DUMP_STORAGE_JS, timeout=10)
+                                    DUMP_STORAGE_JS, timeout=12)
                 try:
                     with open(STORAGE_RESP, "w", encoding="utf-8") as f:
                         f.write(json.dumps({
@@ -364,118 +384,88 @@ async def serve_ctrl_requests(br):
                     pass
                 break
 
-    if not os.path.exists(req_file):
-        return
-    try:
-        req = json.loads(open(req_file).read())
-        os.remove(req_file)
-    except (OSError, ValueError):
-        return
-    appid = req.get("appid")
-    v = MP.get(appid)
-    result = {"error": "unknown appid"}
-    try:
-        if req.get("path") == "/breakpoint" and v:
-            line = int(req.get("line", 0))
-            f = req.get("file", "app-service.js")
-            url = ("https://usr/" + f) if "/" not in f else f
-            v.setdefault("bps", {})
-            if req.get("remove"):
-                bpid = v["bps"].pop(f"{f}:{line}", None)
-                if bpid:
-                    r = await br.cmd("Debugger.removeBreakpoint", v["sid"],
-                                     breakpointId=bpid)
-                    result = {"ok": True, "removed": bpid}
-                else:
-                    result = {"ok": False, "error": "no such breakpoint"}
-            else:
-                r = await br.cmd(
-                    "Debugger.setBreakpointByUrl", v["sid"],
-                    lineNumber=max(0, line - 1), url=url,
-                    columnNumber=0)
-                bpid = (r or {}).get("breakpointId")
-                # fallback: scriptId-based when by-url yields no location
-                if bpid and not (r or {}).get("locations"):
-                    for surl, sid_script in v["scripts"].items():
-                        if surl.endswith(f):
-                            r2 = await br.cmd(
-                                "Debugger.setBreakpoint", v["sid"],
-                                location={"scriptId": sid_script,
-                                          "lineNumber": max(0, line - 1)},
-                                condition="")
-                            if r2 and r2.get("breakpointId"):
-                                r, bpid = r2, r2["breakpointId"]
-                            break
-                if bpid:
-                    v["bps"][f"{f}:{line}"] = bpid
-                result = {"ok": bool(bpid), "breakpointId": bpid, "raw": r}
-        elif req.get("path") == "/control" and v:
-            action = req.get("action", "resume")
-            method = {"resume": "Debugger.resume",
-                      "stepOver": "Debugger.stepOver",
-                      "stepInto": "Debugger.stepInto",
-                      "stepOut": "Debugger.stepOut"}.get(action)
-            if method:
-                r = await br.cmd(method, v["sid"], timeout=5)
-                result = {"ok": isinstance(r, dict) and
-                          "_err" not in r and "error" not in r, "raw": r}
-            else:
-                result = {"error": "bad action"}
-        elif req.get("path") == "/eval" and v:
-            code = req.get("code", "")
-            if v.get("paused") and v.get("topFrame"):
-                r = await br.cmd(
-                    "Debugger.evaluateOnCallFrame", v["sid"],
-                    callFrameId=v["topFrame"], expression=code,
-                    returnByValue=True, silent=True)
-                val = ((r or {}).get("result") or {}).get("value")
-                result = {"ok": True, "frame": True, "value": val}
-            else:
-                val = await eval_js(br, v["sid"], v["ctx"],
-                                    "(function(){try{var r=(" + code +
-                                    ");r=(r===undefined?'undefined':r);"
-                                    "return JSON.stringify({ok:true,"
-                                    "r:r})}catch(e){return "
-                                    "JSON.stringify({ok:false,e:"
-                                    "String(e)})}})()")
-                result = {"ok": True, "frame": False, "value": val}
-    except Exception as exc:
-        result = {"error": f"{type(exc).__name__}: {exc}"}
-    try:
-        with open(resp_file, "w") as f:
-            f.write(json.dumps(result, ensure_ascii=False))
-    except OSError:
+
+class CtrlHandler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
         pass
+
+    def _json(self, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            req = {}
+        req["path"] = self.path.split("?")[0]
+        ev = threading.Event()
+        box = {}
+        _loop.call_soon_threadsafe(_ctrl_queue.put_nowait,
+                                   (req, ev, box))
+        if not ev.wait(timeout=20):
+            self._json({"error": "session 未响应 (bridge 断开?)"})
+            return
+        self._json(box.get("result") or {"error": "no result"})
+
+    def do_GET(self):
+        if self.path.split("?")[0] == "/status":
+            self._json({a: {"debugger": True,
+                            "scripts": list(v["scripts"].keys())[:20],
+                            "paused": v["paused"],
+                            "bps": list(v.get("bps", {}).keys())}
+                        for a, v in MP.items()})
+        else:
+            self._json({})
 
 
 async def run_session(port):
-    agent = open(os.path.join(ROOT, "scripts", "rea_agent.js")).read()
     async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=3,
-                                  max_size=2**23) as ws:
+                                  max_size=2**24) as ws:
         br = Br(ws)
         await br.start()
-        ws_ref["br"] = br
-        await setup_targets(br)
-        if not MP:
-            print("[sess] no service contexts found", flush=True)
-            await asyncio.sleep(4)
-            return
-        while True:
-            await asyncio.sleep(1.0)
-            await serve_ctrl_requests(br)
-            for appid in list(MP):
-                if not await poll_agent(br, appid):
-                    del MP[appid]
-            if not MP:
-                return  # rescan
+        ctrl_task = asyncio.create_task(ctrl_loop(br))
+        try:
+            while True:
+                await setup_targets(br)
+                if not MP:
+                    await asyncio.sleep(4)
+                    continue
+                for _ in range(8):   # ~12s between rescans
+                    await asyncio.sleep(1.5)
+                    await legacy_file_requests(br)
+                    for appid in list(MP):
+                        if not await poll_agent(br, appid):
+                            print(f"[sess] drop {appid}", flush=True)
+                            del MP[appid]
+                    if not MP:
+                        break
+        finally:
+            ctrl_task.cancel()
 
 
 async def main():
+    global _loop, _ctrl_queue
     os.makedirs("/tmp/wechat_rea", exist_ok=True)
-    print("[sess] service session daemon v3 started", flush=True)
+    # rotate events: each session starts clean
+    try:
+        if os.path.exists(EVENTS):
+            os.rename(EVENTS, EVENTS + ".old")
+    except OSError:
+        pass
+    open(EVENTS, "a").close()
+    print("[sess] service session daemon v3.1 started", flush=True)
+
+    _loop = asyncio.get_event_loop()
+    _ctrl_queue = asyncio.Queue()
 
     server = ThreadingHTTPServer(("127.0.0.1", CTRL_PORT), CtrlHandler)
-    import threading
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     while True:

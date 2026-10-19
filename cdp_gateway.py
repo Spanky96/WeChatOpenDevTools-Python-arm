@@ -157,6 +157,9 @@ class NetInjector:
         """Read agent events appended since our last read."""
         out = []
         try:
+            size = os.path.getsize(AGENT_EVENTS)
+            if self.offset > size:      # rotated/truncated — start over
+                self.offset = 0
             with open(AGENT_EVENTS, encoding="utf-8", errors="replace") as f:
                 f.seek(self.offset)
                 chunk = f.read()

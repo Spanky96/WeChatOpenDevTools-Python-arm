@@ -497,8 +497,8 @@ async def run_session(port):
                     await asyncio.sleep(4)
                     continue
                 stale_cycles = 0
-                for _ in range(20):  # ~30s between rescans
-                    await asyncio.sleep(1.5)
+                for _ in range(5):   # ~15s between rescans
+                    await asyncio.sleep(3.0)
                     await legacy_file_requests(br)
                     activity = False
                     for appid in list(MP):

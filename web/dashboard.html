@@ -198,6 +198,7 @@ let state = {
   net: {}, con: {}, netSel: null,
   srcLines: null, srcFormatted: null, formatted: false,
   srcFile: null, bps: new Set(), paused: {},
+  firstSeen: {},
   lastT: Date.now()/1000 - 2,   // only events from this dashboard session
 };
 function dot(id,on){document.getElementById(id).className='dot '+(on?'on':'off');}
@@ -207,9 +208,19 @@ function ts(t){t=Number(t)||0;if(t>1e12)t/=1000;const d=new Date(t*1000);return 
 /* ---------- app selector ---------- */
 function renderApps(targets){
   const box=document.getElementById('apps');
-  const real=(targets||[]).filter(t=>t.appid&&t.appid.startsWith('wx'));
+  let real=(targets||[]).filter(t=>t.appid&&t.appid.startsWith('wx'));
   box.innerHTML='';
   if(!real.length){box.innerHTML='<div class="sub" style="padding:6px">未发现小程序 — 开发者工具发起真机调试后，在微信打开任意小程序</div>';return;}
+  // track first-seen order
+  state.firstSeen = state.firstSeen || {};
+  for(const t of real) if(!state.firstSeen[t.appid]) state.firstSeen[t.appid]=Date.now();
+  // sort: 真机调试(v0) first, then by first-seen (launch order)
+  real = real.slice().sort((a,b)=>{
+    const av=(a.url.match(/servicewechat\.com\/wx[0-9a-f]+\/(\d+)\//)||[])[1];
+    const bv=(b.url.match(/servicewechat\.com\/wx[0-9a-f]+\/(\d+)\//)||[])[1];
+    if((av==='0')!==(bv==='0')) return av==='0'?-1:1;
+    return state.firstSeen[a.appid]-state.firstSeen[b.appid];
+  });
   if(!state.selected||!real.find(t=>t.appid===state.selected)) state.selected=real[0].appid;
   for(const t of real){
     const a=t.appid;

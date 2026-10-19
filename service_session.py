@@ -182,7 +182,7 @@ async def setup_targets(br):
         if not sid:
             continue
         await br.cmd("Runtime.enable", sid)
-        evs = await br.drain(1.2)
+        evs = await br.drain(0.8)
         ctxs = [e["params"]["context"] for e in evs
                 if e.get("method") == "Runtime.executionContextCreated"]
         svc = None
@@ -532,7 +532,7 @@ async def run_session(port):
                     await asyncio.sleep(4)
                     continue
                 stale_cycles = 0
-                for _ in range(5):   # ~15s between rescans
+                for _ in range(5):   # ~15s rounds, 3s polls (bridge-safe)
                     await asyncio.sleep(3.0)
                     await legacy_file_requests(br)
                     activity = False

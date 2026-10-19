@@ -5,215 +5,429 @@
 <title>微信小程序 DevTools</title>
 <style>
   :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --fg:#e6e9ef;
-          --dim:#8b93a3; --green:#3ddc84; --red:#ff5c5c; --blue:#5aa2ff; --amber:#ffb454; }
+          --dim:#8b93a3; --green:#3ddc84; --red:#ff5c5c; --blue:#5aa2ff;
+          --amber:#ffb454; --sel:#1d4ed3; }
   * { box-sizing:border-box; margin:0; padding:0; }
-  body { background:var(--bg); color:var(--fg);
-         font:14px/1.5 -apple-system,"SF Pro Text",sans-serif; padding:20px 24px; }
-  h1 { font-size:18px; margin-bottom:4px; }
-  .sub { color:var(--dim); font-size:12px; margin-bottom:16px; }
-  .row { display:flex; gap:8px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }
-  .status-dot { width:8px; height:8px; border-radius:50%; margin-right:4px; }
+  html,body { height:100%; }
+  body { background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
+         font:13px/1.5 -apple-system,"SF Pro Text",sans-serif; padding:14px 16px; }
+  h1 { font-size:16px; }
+  .sub { color:var(--dim); font-size:11px; }
+  .statusbar { display:flex; gap:14px; align-items:center; padding-bottom:10px;
+               border-bottom:1px solid var(--line); margin-bottom:10px; }
+  .dot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:4px; }
   .on { background:var(--green); } .off { background:var(--red); }
-  .tag { font-size:11px; color:var(--dim); margin-right:12px; }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
-  .panel h2 { font-size:13px; color:var(--dim); font-weight:600; text-transform:uppercase;
-              letter-spacing:.05em; margin-bottom:10px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th { text-align:left; color:var(--dim); font-weight:500; padding:6px 8px;
-       border-bottom:1px solid var(--line); }
-  td { padding:7px 8px; border-bottom:1px solid var(--line); }
-  tr:hover td { background:#1f232c; }
-  button { background:#242936; color:var(--fg); border:1px solid var(--line);
-           border-radius:6px; padding:4px 14px; font-size:12px; cursor:pointer; }
-  button:hover { background:#2e3546; }
-  button.devtools { background:#1d4ed3; border-color:#2563eb; font-weight:600; }
-  button.devtools:hover { background:#2563eb; }
-  .m { font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-  .method { font-weight:600; }
+  .tag { font-size:11px; color:var(--dim); }
+
+  /* mini-program selector */
+  .apps { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .app-card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+              padding:8px 12px; cursor:pointer; display:flex; gap:10px;
+              align-items:center; }
+  .app-card.selected { border-color:var(--sel); background:#1a2740; }
+  .app-card .appid { font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+  .app-card .badges { display:flex; gap:6px; }
+  .badge { font-size:10px; padding:1px 7px; border-radius:8px; background:#232937;
+           color:var(--dim); }
+  .badge.bridge { color:var(--green); }
+  .badge.agent { color:var(--blue); }
+  .app-card button { font-size:11px; padding:2px 10px; }
+
+  /* tabs */
+  .tabs { display:flex; gap:4px; margin-bottom:0; }
+  .tab { background:var(--panel); border:1px solid var(--line); border-bottom:none;
+         border-radius:8px 8px 0 0; padding:7px 18px; cursor:pointer;
+         color:var(--dim); font-size:12px; }
+  .tab.active { color:var(--fg); background:#1e2330; font-weight:600; }
+  .tabbody { background:var(--panel); border:1px solid var(--line); border-radius:0 8px 8px 8px;
+             padding:12px; flex:1; overflow:hidden; display:flex; flex-direction:column; }
+  .page { display:none; flex:1; overflow:hidden; flex-direction:column; }
+  .page.active { display:flex; }
+
+  /* console */
+  #console-scroll { overflow-y:auto; flex:1; }
+  .cline { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; padding:3px 6px;
+           border-bottom:1px dashed #20242e; word-break:break-all; white-space:pre-wrap; }
+  .cline:hover { background:#1f232c; }
+  .lv-error { color:var(--red); } .lv-warn { color:var(--amber); }
+  .lv-info { color:var(--blue); }
+  .cline .ts { color:#5a6272; margin-right:8px; font-size:10px; }
+  .srclink { color:var(--blue); cursor:pointer; text-decoration:underline;
+             margin-left:8px; font-size:11px; }
+
+  /* network */
+  .netwrap { display:flex; gap:10px; flex:1; overflow:hidden; }
+  .netlist { width:44%; overflow-y:auto; border-right:1px solid var(--line); }
+  .netdetail { flex:1; overflow-y:auto; padding-left:10px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th { text-align:left; color:var(--dim); font-weight:500; padding:5px 7px;
+       border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--panel); }
+  td { padding:5px 7px; border-bottom:1px solid #20242e; }
+  tr.nrow { cursor:pointer; }
+  tr.nrow:hover td, tr.nrow.selected td { background:#1f232c; }
+  .m { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
+  .method { font-weight:700; font-size:11px; }
   .GET { color:var(--green); } .POST { color:var(--amber); }
   .PUT,.DELETE,.PATCH { color:var(--red); }
   .s2 { color:var(--green); font-weight:600; } .s4,.s5 { color:var(--red); font-weight:600; }
-  .netrow { cursor:pointer; }
-  .detail { white-space:pre-wrap; word-break:break-all; background:#12151b;
-            border:1px solid var(--line); border-radius:8px; padding:10px;
-            font-family:ui-monospace,Menlo,monospace; font-size:11.5px;
-            max-height:280px; overflow:auto; margin-bottom:10px; display:none; }
-  .console-line { font-family:ui-monospace,Menlo,monospace; font-size:12px;
-                  padding:2px 0; border-bottom:1px dashed #222631; word-break:break-all; }
-  .lv-error { color:var(--red); } .lv-warn { color:var(--amber); }
-  .lv-info { color:var(--blue); } .lv-log { color:var(--fg); }
-  #repl-in { width:calc(100% - 70px); background:#12151b; color:var(--fg);
-             border:1px solid var(--line); border-radius:6px; padding:6px 10px;
-             font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-  .flex-tabs { display:flex; gap:6px; margin-bottom:10px; }
-  .flex-tabs button.active { background:#1d4ed3; border-color:#2563eb; }
-  #net-body, #console-body { max-height:340px; overflow:auto; }
-  .pill { font-size:10px; padding:1px 7px; border-radius:8px;
-          background:#232937; color:var(--dim); margin-left:6px; }
+  .kv { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+  .kv .k { color:var(--dim); display:inline-block; min-width:120px; }
+  .sec { margin-bottom:12px; }
+  .sec h3 { font-size:11px; color:var(--dim); text-transform:uppercase;
+            letter-spacing:.05em; margin-bottom:6px; }
+  pre.body { background:#12151b; border:1px solid var(--line); border-radius:6px;
+             padding:8px; font-family:ui-monospace,Menlo,monospace; font-size:11px;
+             white-space:pre-wrap; word-break:break-all; max-height:260px; overflow:auto; }
+
+  /* storage */
+  .stbar { margin-bottom:8px; display:flex; gap:10px; align-items:center; }
+
+  /* source */
+  .srcbar { display:flex; gap:8px; margin-bottom:8px; }
+  select, .srcbar input { background:#12151b; color:var(--fg); border:1px solid var(--line);
+        border-radius:6px; padding:4px 8px; font-size:12px; }
+  #src-scroll { overflow:auto; flex:1; }
+  .srcline { font-family:ui-monospace,Menlo,monospace; font-size:11.5px;
+             white-space:pre; line-height:1.45; }
+  .srcline .no { color:#5a6272; display:inline-block; width:52px; text-align:right;
+                 margin-right:14px; user-select:none; }
+  .srcline.hl { background:#3b2e0a; outline:1px solid var(--amber); }
+  .btn { background:#242936; color:var(--fg); border:1px solid var(--line);
+         border-radius:6px; padding:4px 14px; font-size:12px; cursor:pointer; }
+  .btn:hover { background:#2e3546; }
+  .empty { color:var(--dim); padding:30px; text-align:center; }
 </style>
 </head>
 <body>
-<h1>微信小程序 DevTools <span class="pill">4.1.13</span></h1>
-<div class="sub">vConsole · Chrome DevTools · 网络捕获 · Service REPL — 全自动</div>
 
-<div class="row">
-  <span class="tag"><span class="status-dot" id="dot-sniper"></span>sniper</span>
-  <span class="tag"><span class="status-dot" id="dot-gateway"></span>gateway</span>
-  <span class="tag"><span class="status-dot" id="dot-sess"></span>service</span>
-  <span class="tag" id="bridge-tag">bridge: ?</span>
+<div class="statusbar">
+  <h1>微信小程序 DevTools</h1>
+  <span class="sub">4.1.13 · 网络捕获 / 控制台 / Storage / 源码定位</span>
+  <span style="flex:1"></span>
+  <span class="tag"><span class="dot" id="d-sniper"></span>sniper</span>
+  <span class="tag"><span class="dot" id="d-gateway"></span>gateway</span>
+  <span class="tag"><span class="dot" id="d-sess"></span>service</span>
+  <span class="tag" id="bridge-tag">桥: -</span>
 </div>
 
-<div class="panel">
-  <h2>小程序目标</h2>
-  <table>
-    <thead><tr><th>AppID</th><th>URL</th><th></th></tr></thead>
-    <tbody id="targets"></tbody>
-  </table>
-  <div class="sub" id="targets-empty" style="display:none">
-    没有发现小程序。在微信开发者工具发起真机调试，然后在微信中打开任意小程序。
-  </div>
-</div>
+<div class="apps" id="apps"></div>
 
-<div class="panel">
-  <h2>网络请求 <span class="pill" id="net-count">0</span></h2>
-  <div class="detail" id="net-detail"></div>
-  <div id="net-body">
-    <table>
-      <thead><tr><th style="width:52px">方法</th><th>URL</th><th style="width:110px">状态</th><th style="width:90px">来源</th></tr></thead>
-      <tbody id="net-rows"></tbody>
-    </table>
-  </div>
+<div class="tabs">
+  <div class="tab active" data-tab="console">控制台</div>
+  <div class="tab" data-tab="network">网络 <span id="net-badge" style="font-size:10px"></span></div>
+  <div class="tab" data-tab="storage">Storage</div>
+  <div class="tab" data-tab="source">源码</div>
 </div>
-
-<div class="panel">
-  <h2>Service 控制台 / REPL</h2>
-  <div style="margin-bottom:10px">
-    <input id="repl-in" placeholder='在小程序 service 层执行 JS，如: typeof wx.request ｜  __REA__.events.length ｜  getApp().route' />
-    <button onclick="sendEval()">执行</button>
+<div class="tabbody">
+  <div class="page active" id="page-console">
+    <div id="console-scroll"></div>
   </div>
-  <div id="console-body"></div>
+  <div class="page" id="page-network">
+    <div class="netwrap">
+      <div class="netlist">
+        <table>
+          <thead><tr><th style="width:46px">方法</th><th>URL</th><th style="width:44px">状态</th></tr></thead>
+          <tbody id="net-rows"></tbody>
+        </table>
+        <div class="empty" id="net-empty">暂无请求 — 与小程序交互即可捕获</div>
+      </div>
+      <div class="netdetail" id="net-detail"><div class="empty">点击左侧请求查看详情</div></div>
+    </div>
+  </div>
+  <div class="page" id="page-storage">
+    <div class="stbar">
+      <button class="btn" onclick="loadStorage()">刷新 Storage</button>
+      <span class="sub" id="st-info"></span>
+    </div>
+    <div style="overflow:auto; flex:1">
+      <table>
+        <thead><tr><th style="width:32%">Key</th><th>Value</th></tr></thead>
+        <tbody id="st-rows"></tbody>
+      </table>
+      <div class="empty" id="st-empty">点击刷新读取小程序本地存储</div>
+    </div>
+  </div>
+  <div class="page" id="page-source">
+    <div class="srcbar">
+      <select id="src-file" onchange="loadSource()"></select>
+      <input id="src-goto" placeholder="行号" style="width:70px" onkeydown="if(event.key==='Enter')gotoLine(this.value)">
+      <span class="sub" id="src-info"></span>
+    </div>
+    <div id="src-scroll"></div>
+  </div>
 </div>
 
 <script>
-let netEvents = [];
-let consoleLines = [];
-const NET_MAX = 300, CON_MAX = 200;
+let state = {
+  selected: null,          // selected appid
+  agents: new Set(),       // appids with captured events (= agent live)
+  net: {},                 // appid -> [net events]
+  con: {},                 // appid -> [console lines]
+  netSel: null,            // selected request id
+  srcLines: [],
+  lastT: 0,
+};
 
-function dot(id, on) {
-  const el = document.getElementById(id);
-  el.className = 'status-dot ' + (on ? 'on' : 'off');
-}
+function dot(id, on){ document.getElementById(id).className = 'dot ' + (on?'on':'off'); }
+function esc(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function ts(t){ const d=new Date((t||0)*1000); return d.toTimeString().slice(0,8); }
 
-function renderTargets(data) {
-  dot('dot-sniper', data.sniper); dot('dot-gateway', data.gateway);
-  dot('dot-sess', data.sess);
-  document.getElementById('bridge-tag').textContent =
-    'bridge: ' + (data.bridge || '未连接');
-  const tb = document.getElementById('targets');
-  tb.innerHTML = '';
-  const list = (data.targets || []).filter(t => t.appid !== 'H5');
-  document.getElementById('targets-empty').style.display =
-    list.length ? 'none' : 'block';
-  for (const t of list) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="m">${t.appid}</td>
-      <td class="m" style="color:var(--dim)">${t.url}</td>
-      <td><button class="devtools" onclick="openDevtools('${t.targetId}')">DevTools</button></td>`;
-    tb.appendChild(tr);
+/* ---------- app selector ---------- */
+function renderApps(targets){
+  const box = document.getElementById('apps');
+  const real = (targets||[]).filter(t=>t.appid && t.appid.startsWith('wx'));
+  box.innerHTML = '';
+  if (!real.length) {
+    box.innerHTML = '<div class="sub" style="padding:8px">未发现小程序 — 在微信开发者工具发起真机调试，再打开任意小程序</div>';
+    return;
+  }
+  if (!state.selected || !real.find(t=>t.appid===state.selected))
+    state.selected = real[0].appid;
+  for (const t of real) {
+    const a = t.appid;
+    const card = document.createElement('div');
+    card.className = 'app-card' + (a===state.selected?' selected':'');
+    card.onclick = ()=>{ state.selected=a; renderApps(targets); renderAll(); };
+    const agent = state.agents.has(a);
+    card.innerHTML = `<span class="appid">${a}</span>
+      <span class="badges">
+        ${agent?'<span class="badge agent">agent●</span>':''}
+        <span class="badge bridge">桥</span>
+      </span>
+      <button onclick="event.stopPropagation();openDevtools('${t.targetId}')">DevTools</button>`;
+    box.appendChild(card);
   }
 }
+function openDevtools(tid){ fetch('/api/open_devtools?target_id='+tid); }
 
-function openDevtools(tid) {
-  fetch('/api/open_devtools?target_id=' + tid);
-}
-
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
-
-function renderNet() {
-  document.getElementById('net-count').textContent = netEvents.length;
-  const tb = document.getElementById('net-rows');
-  tb.innerHTML = '';
-  const recent = netEvents.slice(-100).reverse();
-  for (const e of recent) {
-    const d = e.data || {};
-    if (e.type !== 'request' && e.type !== 'response') continue;
-    const tr = document.createElement('tr');
-    tr.className = 'netrow';
-    if (e.type === 'request') {
-      tr.innerHTML = `<td class="m method ${esc(d.method)}">${esc(d.method)}</td>
-        <td class="m">${esc(d.url || '')}</td>
-        <td class="m" style="color:var(--dim)">…</td>
-        <td class="m" style="color:var(--dim)">${esc((e.appid||'').slice(0,10))}</td>`;
-    } else {
-      const st = d.status || 0;
-      tr.innerHTML = `<td class="m" style="color:var(--dim)">↳ ${esc(d.api||'')}</td>
-        <td class="m" style="color:var(--dim)">${esc(d.url || '')}</td>
-        <td class="m s${String(st)[0]}">${st}</td>
-        <td class="m" style="color:var(--dim)">${esc((e.appid||'').slice(0,10))}</td>`;
-    }
-    tr.onclick = () => showDetail(e);
-    tb.appendChild(tr);
-  }
-}
-
-function showDetail(e) {
-  const el = document.getElementById('net-detail');
-  el.style.display = 'block';
-  el.textContent = JSON.stringify(e, null, 1);
-}
-
-function renderConsole() {
-  const body = document.getElementById('console-body');
-  body.innerHTML = consoleLines.slice(-60).map(l => {
-    const cls = 'console-line lv-' + esc(l.level || 'log');
-    return `<div class="${cls}">${esc(l.text)}</div>`;
-  }).join('');
-  body.scrollTop = body.scrollHeight;
-}
-
-function sendEval() {
-  const code = document.getElementById('repl-in').value.trim();
-  if (!code) return;
-  fetch('/api/eval?code=' + encodeURIComponent(code));
-  consoleLines.push({level:'info', text: '» ' + code});
-  renderConsole();
-}
-
-document.getElementById('repl-in').addEventListener('keydown', e => {
-  if (e.key === 'Enter') sendEval();
+/* ---------- tabs ---------- */
+document.querySelectorAll('.tab').forEach(el=>{
+  el.onclick = ()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('page-'+el.dataset.tab).classList.add('active');
+    if (el.dataset.tab==='storage') loadStorage();
+    if (el.dataset.tab==='source') loadFileList();
+  };
 });
 
-function ingestEvents(events) {
-  for (const e of events) {
-    if (e.type === 'request' || e.type === 'response' || e.type === 'fail') {
-      netEvents.push(e);
-      if (netEvents.length > NET_MAX) netEvents.shift();
-    } else if (e.type === 'console') {
-      const d = e.data || {};
-      consoleLines.push({level: d.level || 'log',
-                         text: (d.args || []).join(' ')});
-      if (consoleLines.length > CON_MAX) consoleLines.shift();
-    } else if (e.type === 'eval_result' || e.type === 'error') {
-      consoleLines.push({level: 'info', text: '⇐ ' + (e.data ?? '')});
-      if (consoleLines.length > CON_MAX) consoleLines.shift();
+/* ---------- event ingestion ---------- */
+function ingest(evs){
+  for (const e of evs){
+    const a = e.appid || '?';
+    state.agents.add(a);
+    const t = e.type;
+    if (t==='request'||t==='response'||t==='fail'){
+      (state.net[a] = state.net[a]||[]).push(e);
+      if (state.net[a].length>400) state.net[a].shift();
+    } else if (t==='console'||t==='error'||t==='route'||t==='eval_result'){
+      (state.con[a] = state.con[a]||[]).push(e);
+      if (state.con[a].length>300) state.con[a].shift();
     }
   }
 }
 
-async function poll() {
-  try {
-    const r = await fetch('/api/status');
-    renderTargets(await r.json());
-    const r2 = await fetch('/api/events');
-    const evs = await r2.json();
-    if (Array.isArray(evs) && evs.length) {
-      ingestEvents(evs);
-      renderNet(); renderConsole();
+/* ---------- console ---------- */
+function srcLinksFor(text){
+  // clickable app-service.js:LINE:COL references in error stacks
+  return text.replace(/((?:[\w.-]+\.js):(\d+):(\d+))/g,
+    '<span class="srclink" onclick="openSrcAt(\'$1\',$2,$3)">$1</span>');
+}
+function renderConsole(){
+  const box = document.getElementById('console-scroll');
+  const lines = (state.con[state.selected]||[]).slice(-150);
+  box.innerHTML = lines.map(e=>{
+    const d = e.data||{};
+    let text, level='log';
+    if (e.type==='console'){ level=d.level||'log'; text=(d.args||[]).map(fmtArg).join(' '); }
+    else if (e.type==='route'){ level='info'; text='▶ 页面: '+d.route; }
+    else if (e.type==='error'){ level='error'; text='✖ '+fmtArg(d.msg); }
+    else if (e.type==='eval_result'){ level='info'; text='⇐ '+fmtArg(d.data); }
+    else { text=fmtArg(d); }
+    return `<div class="cline lv-${esc(level)}"><span class="ts">${ts(e.t)}</span>${srcLinksFor(esc(text))}</div>`;
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+function fmtArg(x){
+  if (x===null||x===undefined) return String(x);
+  if (typeof x==='object'){
+    if (x.__err) return `${x.name}: ${x.message}\n${x.stack||''}`;
+    return JSON.stringify(x);
+  }
+  return String(x);
+}
+
+/* ---------- network ---------- */
+function renderNet(){
+  const tb = document.getElementById('net-rows');
+  const evs = state.net[state.selected]||[];
+  document.getElementById('net-badge').textContent = evs.length?`(${evs.length})`:'';
+  document.getElementById('net-empty').style.display = evs.length?'none':'block';
+  tb.innerHTML='';
+  // newest first
+  for (const e of evs.slice().reverse()){
+    const d=e.data||{};
+    const tr=document.createElement('tr');
+    tr.className='nrow'+(state.netSel===d.id?' selected':'');
+    if (e.type==='request'){
+      tr.innerHTML=`<td class="m method ${esc(d.method||'GET')}">${esc(d.method||'GET')}</td>
+        <td class="m">${esc(shortUrl(d.url))}</td><td class="m" style="color:var(--dim)">…</td>`;
+    } else if (e.type==='response'){
+      const st=d.status||0;
+      tr.innerHTML=`<td class="m" style="color:var(--dim)">↳</td>
+        <td class="m" style="color:var(--dim)">${esc(shortUrl(d.url))}</td>
+        <td class="m s${String(st)[0]}">${st}</td>`;
+    } else {
+      tr.innerHTML=`<td class="m" style="color:var(--red)">✖</td>
+        <td class="m" style="color:var(--red)">${esc(shortUrl(d.url))}</td>
+        <td></td>`;
     }
-  } catch (e) { /* server restarting */ }
+    tr.onclick=()=>{ state.netSel=d.id; renderNet(); renderDetail(e); };
+    tb.appendChild(tr);
+  }
+}
+function shortUrl(u){
+  u=String(u||'');
+  try{ const x=new URL(u); return (x.pathname+x.search).slice(0,90); }catch(e){ return u.slice(0,90); }
+}
+function renderDetail(e){
+  const box=document.getElementById('net-detail');
+  const d=e.data||{};
+  // find the matching request for a response/fail
+  let req=null;
+  if (e.type!=='request'){
+    req=(state.net[state.selected]||[]).find(x=>x.type==='request'&&x.data&&x.data.id===d.id);
+  }
+  const kv=(o)=>Object.entries(o||{}).map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span>${esc(v)}</div>`).join('')||'<div class="sub">（无）</div>';
+  let html='';
+  html+=`<div class="sec"><h3>概览</h3><div class="kv">
+    <span class="k">URL</span>${esc(d.url||'')}<br>
+    <span class="k">方法</span>${esc((req&&req.data.method)||d.method||'-')}<br>
+    <span class="k">状态</span>${d.status!==undefined?esc(d.status):'…'}<br>
+    <span class="k">API</span>${esc(d.api||'-')}<br>
+    <span class="k">时间</span>${ts(e.t)}</div></div>`;
+  if (req){
+    html+=`<div class="sec"><h3>请求头</h3>${kv(parseHeader(req.data.header))}</div>`;
+    html+=`<div class="sec"><h3>请求数据</h3><pre class="body">${esc(pretty(req.data.data))}</pre></div>`;
+  }
+  if (e.type==='response'){
+    html+=`<div class="sec"><h3>响应头</h3>${kv(parseHeader(d.header))}</div>`;
+    html+=`<div class="sec"><h3>响应体</h3><pre class="body">${esc(pretty(d.data))}</pre></div>`;
+  }
+  if (e.type==='fail'){
+    html+=`<div class="sec"><h3>失败</h3><pre class="body" style="color:var(--red)">${esc(fmtArg(d.err))}</pre></div>`;
+  }
+  box.innerHTML=html;
+}
+function parseHeader(h){
+  const o={};
+  if (typeof h==='string'){ try{ Object.assign(o, JSON.parse(h)); return o; }catch(e){} }
+  if (typeof h==='object'&&h) return h;
+  return {};
+}
+function pretty(x){
+  if (typeof x==='string'){ try{ return JSON.stringify(JSON.parse(x),null,1); }catch(e){ return x; } }
+  return fmtArg(x);
+}
+
+/* ---------- storage ---------- */
+async function loadStorage(){
+  const info=document.getElementById('st-info');
+  info.textContent='读取中…';
+  try{
+    const r=await fetch('/api/storage?appid='+state.selected);
+    const j=await r.json();
+    const d=j.data||{};
+    if (d.err){ info.textContent='错误: '+d.err; return; }
+    info.textContent=`${d.currentSize??'?'} / ${d.limitSize??'?'} KB · ${((d.keys)||[]).length} keys`;
+    const tb=document.getElementById('st-rows');
+    tb.innerHTML=((d.kv&&Object.entries(d.kv))||[]).map(([k,v])=>
+      `<tr><td class="m">${esc(k)}</td><td class="m" style="word-break:break-all">${esc(String(v).slice(0,1500))}</td></tr>`).join('');
+    document.getElementById('st-empty').style.display=
+      ((d.keys)||[]).length?'none':'block';
+  }catch(e){ info.textContent='读取失败: '+e; }
+}
+
+/* ---------- source ---------- */
+async function loadFileList(){
+  if (!state.selected) return;
+  const sel=document.getElementById('src-file');
+  if (sel.dataset.appid===state.selected && sel.options.length) return;
+  sel.dataset.appid=state.selected;
+  sel.innerHTML='<option>加载中…</option>';
+  try{
+    const r=await fetch('/api/files?appid='+state.selected);
+    const j=await r.json();
+    sel.innerHTML=(j.files||[]).map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join('')
+      ||'<option>（无文件 — 需先打开过该小程序）</option>';
+    await loadSource();
+  }catch(e){ sel.innerHTML='<option>加载失败</option>'; }
+}
+async function loadSource(hlLine, hlCol){
+  const sel=document.getElementById('src-file');
+  const file=sel.value;
+  if (!file||file.includes('（')) return;
+  document.getElementById('src-info').textContent='加载中… '+file;
+  try{
+    const r=await fetch(`/api/source?appid=${state.selected}&file=${encodeURIComponent(file)}`);
+    const j=await r.json();
+    if (j.error){ document.getElementById('src-info').textContent=j.error; return; }
+    state.srcLines=j.lines||[];
+    renderSource(hlLine,hlCol);
+    document.getElementById('src-info').textContent=`${file} · ${state.srcLines.length} 行`;
+  }catch(e){ document.getElementById('src-info').textContent='加载失败'; }
+}
+function renderSource(hlLine,hlCol){
+  const box=document.getElementById('src-scroll');
+  const frag=[];
+  const max=state.srcLines.length;
+  for(let i=0;i<max;i++){
+    const n=i+1;
+    const hl=hlLine===n?' hl':'';
+    let text=esc(state.srcLines[i]||'');
+    if (hlLine===n&&hlCol){
+      // mark the column with a caret
+      const pre=text.slice(0,hlCol), post=text.slice(hlCol);
+      text=pre+'‸'+post;
+    }
+    frag.push(`<div class="srcline${hl}" id="L${n}"><span class="no">${n}</span>${text}</div>`);
+  }
+  box.innerHTML=frag.join('');
+  if (hlLine){
+    const el=document.getElementById('L'+hlLine);
+    if (el) el.scrollIntoView({block:'center'});
+  } else box.scrollTop=0;
+}
+function gotoLine(n){
+  const ln=parseInt(n); if(ln) renderSource(ln);
+  const el=document.getElementById('L'+ln); if(el) el.scrollIntoView({block:'center'});
+}
+function openSrcAt(ref,line,col){
+  // ref like "app-service.js" — switch to source tab
+  document.querySelector('.tab[data-tab=source]').click();
+  const sel=document.getElementById('src-file');
+  const pick=()=>{ loadSource(line,col); };
+  if (sel.dataset.appid!==state.selected){ loadFileList().then(()=>{ for(const o of sel.options){ if(o.value===ref){sel.value=ref;break;} } pick(); }); }
+  else { for(const o of sel.options){ if(o.value===ref){ sel.value=ref; break; } } pick(); }
+}
+
+/* ---------- polling ---------- */
+function renderAll(){ renderConsole(); renderNet(); }
+async function poll(){
+  try{
+    const r=await fetch('/api/status'); const st=await r.json();
+    dot('d-sniper',st.sniper); dot('d-gateway',st.gateway); dot('d-sess',st.sess);
+    document.getElementById('bridge-tag').textContent='桥: '+(st.bridge||'未连接');
+    renderApps(st.targets);
+    const r2=await fetch('/api/events?since='+state.lastT);
+    const evs=await r2.json();
+    if (Array.isArray(evs)&&evs.length){
+      ingest(evs);
+      for(const e of evs) if(e.t>state.lastT) state.lastT=e.t;
+      renderAll();
+    }
+  }catch(e){}
 }
 poll();
 setInterval(poll, 2000);

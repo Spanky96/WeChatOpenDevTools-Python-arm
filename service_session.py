@@ -2,22 +2,22 @@
 """Persistent mini-program service-layer debug session.
 
 Connects to the WeChat remote-debug bridge, finds each mini-program's
-SERVICE context (the page-frame target's context where `typeof wx ===
+SERVICE context (the page-frame target context where `typeof wx ===
 'object'`), injects scripts/rea_agent.js, then continuously:
 
-  - polls __REA__.events (wx.request / responses / console / errors)
-  - appends them to /tmp/wechat_rea/service_events.jsonl
-  - exposes an eval endpoint file /tmp/wechat_rea/service_eval (write JS,
-    result appears in service_events with type 'eval_result')
+  - drains __REA__.events (requests / responses / console / route /
+    storage changes / errors)
+  - serves eval requests  (/tmp/wechat_rea/service_eval)
+  - serves storage dumps  (/tmp/wechat_rea/service_storage_req)
 
-No bridge (真机调试 not active) => idles and retries.
+Writes JSON lines to /tmp/wechat_rea/service_events.jsonl.
+No bridge (真机调试 not active) => idles and retries with backoff.
 """
 import asyncio
 import glob
 import json
 import os
 import re
-import sys
 import time
 
 import websockets
@@ -26,9 +26,11 @@ LOGDIR = ("/Users/yangyiming/Library/Application Support/微信开发者工具/"
           "d1e8765721a6c23d43b14c95b1843e6b/WeappLog/logs")
 EVENTS = "/tmp/wechat_rea/service_events.jsonl"
 EVAL_FILE = "/tmp/wechat_rea/service_eval"
+STORAGE_REQ = "/tmp/wechat_rea/service_storage_req"
+STORAGE_RESP = "/tmp/wechat_rea/service_storage_resp"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-_last_seen = {}   # appid -> (targetId, ctxId, lastEventCount)
+_last_seen = {}   # appid -> (sessionId, ctxId)  (current connection only)
 _eval_seq = 0
 
 
@@ -88,7 +90,7 @@ class Br:
         return r.get("result", r.get("error"))
 
 
-async def eval_js(br, sid, ctx, expr, timeout=6):
+async def eval_js(br, sid, ctx, expr, timeout=8):
     ev = await br.cmd("Runtime.evaluate", sid, timeout=timeout,
                       expression=expr, contextId=ctx,
                       returnByValue=True, silent=True)
@@ -99,7 +101,7 @@ async def eval_js(br, sid, ctx, expr, timeout=6):
     return None
 
 
-async def service_ctx(br, sid):
+async def find_service_ctx(br, sid):
     await br.cmd("Runtime.enable", sid)
     evs = await br.drain(1.2)
     ctxs = [e["params"]["context"] for e in evs
@@ -111,7 +113,67 @@ async def service_ctx(br, sid):
     return None
 
 
-async def run_session(port, log):
+DUMP_STORAGE_JS = (
+    "(function(){try{var i=wx.getStorageInfoSync();var kv={};"
+    "(i.keys||[]).slice(0,120).forEach(function(k){var v;"
+    "try{v=JSON.stringify(wx.getStorageSync(k))}catch(e){v=String(v)}"
+    "kv[k]=(v||'').slice(0,2000)});"
+    "return JSON.stringify({keys:i.keys||[],sz:i.currentSize,"
+    "limit:i.limitSize,kv:kv})}catch(e){"
+    "return JSON.stringify({err:String(e)})}})()")
+
+
+async def serve_file_requests(br):
+    """Handle eval + storage request files against live contexts."""
+    global _eval_seq
+    if not _last_seen:
+        return
+    # eval
+    if os.path.exists(EVAL_FILE):
+        try:
+            code = open(EVAL_FILE).read().strip()
+            os.remove(EVAL_FILE)
+        except OSError:
+            code = None
+        if code:
+            _eval_seq += 1
+            wrapped = ("(function(){try{var r=(" + code +
+                       ");r=(r===undefined?'undefined':r);"
+                       "return JSON.stringify({ok:true,r:r})}"
+                       "catch(e){return JSON.stringify({ok:false,"
+                       "e:String(e)})}})()")
+            for appid, (sid, ctx) in list(_last_seen.items()):
+                res = await eval_js(br, sid, ctx, wrapped, timeout=10)
+                with open(EVENTS, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "t": time.time(), "appid": appid,
+                        "type": "eval_result", "seq": _eval_seq,
+                        "data": res}, ensure_ascii=False) + "\n")
+                return  # first live appid answers
+    # storage dump
+    if os.path.exists(STORAGE_REQ):
+        try:
+            want = open(STORAGE_REQ).read().strip()
+            os.remove(STORAGE_REQ)
+        except OSError:
+            want = None
+        if want is not None:
+            for appid, (sid, ctx) in list(_last_seen.items()):
+                if want and appid != want:
+                    continue
+                res = await eval_js(br, sid, ctx, DUMP_STORAGE_JS,
+                                    timeout=10)
+                try:
+                    with open(STORAGE_RESP, "w", encoding="utf-8") as f:
+                        f.write(json.dumps({
+                            "appid": appid, "data": json.loads(res)
+                            if isinstance(res, str) else None}))
+                except (OSError, ValueError):
+                    pass
+                return
+
+
+async def run_session(port, log=None):
     agent = open(os.path.join(ROOT, "scripts", "rea_agent.js")).read()
     async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=3,
                                   max_size=2**23) as ws:
@@ -121,6 +183,7 @@ async def run_session(port, log):
         pages = [t for t in r.get("targetInfos", [])
                  if t["type"] == "page" and "servicewechat.com/wx" in
                  t.get("url", "")]
+        _last_seen.clear()
         for t in pages:
             am = re.search(r"(wx[0-9a-f]{16})", t.get("url", ""))
             appid = am.group(1) if am else "?"
@@ -129,112 +192,81 @@ async def run_session(port, log):
             sid = a.get("sessionId") if isinstance(a, dict) else None
             if not sid:
                 continue
-            ctx = await service_ctx(br, sid)
+            ctx = await find_service_ctx(br, sid)
             if ctx is None:
                 print(f"[sess] {appid}: no service ctx", flush=True)
                 continue
             has = await eval_js(br, sid, ctx, "typeof __REA__")
             if has != "object":
-                await eval_js(br, sid, ctx, agent, timeout=10)
+                await eval_js(br, sid, ctx, agent, timeout=12)
                 print(f"[sess] agent injected -> {appid}", flush=True)
-            else:
-                print(f"[sess] agent already present in {appid}", flush=True)
-            _last_seen[appid] = (sid, ctx, 0)
+            _last_seen[appid] = (sid, ctx)
 
         if not _last_seen:
             print("[sess] no service contexts found", flush=True)
             await asyncio.sleep(4)   # back off — don't hammer the bridge
             return
 
-        last_poll = time.time()
         while True:
             await asyncio.sleep(1.0)
-            # eval endpoint (wait until contexts are registered)
-            global _eval_seq
-            if _last_seen and os.path.exists(EVAL_FILE):
+            await serve_file_requests(br)
+            dead = []
+            for appid, (sid, ctx) in _last_seen.items():
                 try:
-                    code = open(EVAL_FILE).read().strip()
-                    os.remove(EVAL_FILE)
-                except OSError:
-                    code = None
-                if code:
-                    _eval_seq += 1
-                    # wx sandbox blocks eval/Function — but direct
-                    # expression execution via Runtime.evaluate works.
-                    wrapped = (
-                        "(function(){try{var r=(" + code +
-                        ");return JSON.stringify({ok:true,"
-                        "r:(r===undefined?'undefined':r)})}"
-                        "catch(e){return JSON.stringify({ok:false,"
-                        "e:String(e)})}})()")
-                    for appid, (sid, ctx, _) in _last_seen.items():
-                        res = await eval_js(br, sid, ctx, wrapped, timeout=10)
-                        log.write(json.dumps({
-                            "t": time.time(), "appid": appid,
-                            "type": "eval_result", "seq": _eval_seq,
-                            "data": res}, ensure_ascii=False) + "\n")
-                        print(f"[eval#{_eval_seq}] {str(res)[:200]}", flush=True)
-
-            if time.time() - last_poll < 2.0:
-                continue
-            last_poll = time.time()
-            for appid in list(_last_seen):
-                try:
-                    sid, ctx, mark = _last_seen[appid]
                     raw = await eval_js(
                         br, sid, ctx,
-                        "(typeof __REA__==='object') ? __REA__.events.length : -1")
-                    if raw is None or raw == -1:
-                        # context died (mini-program closed) — drop
-                        del _last_seen[appid]
-                        print(f"[sess] {appid} context gone", flush=True)
-                        return  # rescan
-                    if not isinstance(raw, int) or raw <= mark:
+                        "(function(){if(typeof __REA__!=='object')"
+                        "return 'DEAD';if(!__REA__.drain)return 'V1';"
+                        "return JSON.stringify(__REA__.drain(200))})()")
+                    if raw == "DEAD":
+                        dead.append(appid)
                         continue
-                    new = await eval_js(
-                        br, sid, ctx,
-                        f"JSON.stringify(__REA__.events.slice({mark}))",
-                        timeout=10)
-                    try:
-                        events = json.loads(new) if isinstance(new, str) else []
-                        if not isinstance(events, list):
-                            events = []
-                    except ValueError:
+                    if raw == "V1":
+                        # legacy v1 agent (no drain) — poll by slice
+                        raw = await eval_js(
+                            br, sid, ctx,
+                            "JSON.stringify(__REA__.events.splice(0,200))")
+                    events = json.loads(raw) if isinstance(raw, str) else []
+                    if not isinstance(events, list):
                         events = []
                     for e in events:
                         if not isinstance(e, dict):
                             continue
-                        log.write(json.dumps(
-                            {"t": time.time(), "appid": appid, **e},
-                            ensure_ascii=False) + "\n")
-                        d = e.get("data")
-                        if not isinstance(d, dict):
-                            d = {}
-                        head = (d.get("url") or d.get("level") or
-                                d.get("msg") or d.get("err") or "")
-                        tail = str(d.get("status") or d.get("method") or "")[:40]
+                        with open(EVENTS, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(
+                                {"t": time.time(), "appid": appid, **e},
+                                ensure_ascii=False) + "\n")
+                        d = e.get("data") if isinstance(e.get("data"), dict) \
+                            else {}
+                        head = (d.get("url") or d.get("route") or
+                                d.get("level") or d.get("msg") or
+                                d.get("op") or d.get("err") or "")
+                        tail = str(d.get("status") or d.get("method") or
+                                   d.get("key") or "")[:40]
                         print(f"[{appid[:10]}] {str(e.get('type')):9} "
                               f"{str(head)[:80]} {tail}", flush=True)
-                    _last_seen[appid] = (sid, ctx, raw)
                 except Exception as exc:
                     print(f"[sess] poll {appid}: {type(exc).__name__} "
                           f"{str(exc)[:60]}", flush=True)
+            for appid in dead:
+                print(f"[sess] {appid} context gone", flush=True)
+                del _last_seen[appid]
+            if not _last_seen:
+                return  # rescan
 
 
 async def main():
     os.makedirs("/tmp/wechat_rea", exist_ok=True)
-    log = open(EVENTS, "a", buffering=1)
-    print("[sess] service session daemon started", flush=True)
+    print("[sess] service session daemon v2 started", flush=True)
     while True:
         port = find_port()
         if port:
             try:
-                await run_session(port, log)
+                await run_session(port)
             except Exception as exc:
                 print(f"[sess] session ended: {type(exc).__name__} "
                       f"{str(exc)[:80]}", flush=True)
-            await asyncio.sleep(3)  # session churn backoff
-        await asyncio.sleep(3)
+        await asyncio.sleep(3)  # churn backoff
 
 
 if __name__ == "__main__":

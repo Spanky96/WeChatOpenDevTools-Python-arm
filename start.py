@@ -135,7 +135,11 @@ class Handler(BaseHTTPRequestHandler):
                 "gateway_port": GATEWAY_PORT,
             })
         elif path == "/api/events":
-            self._json(recent_events())
+            import urllib.parse
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
+                                       if "?" in self.path else "")
+            since = float((qs.get("since") or ["0"])[0])
+            self._json(recent_events(since=since))
         elif path == "/api/eval":
             code = self.path.split("code=", 1)[1] if "code=" in self.path else ""
             import urllib.parse
@@ -146,6 +150,58 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             else:
                 self._json({"ok": False, "error": "no code"})
+        elif path == "/api/storage":
+            import urllib.parse
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
+                                       if "?" in self.path else "")
+            appid = (qs.get("appid") or [""])[0]
+            resp_file = "/tmp/wechat_rea/service_storage_resp"
+            try:
+                os.remove(resp_file)
+            except OSError:
+                pass
+            with open("/tmp/wechat_rea/service_storage_req", "w") as f:
+                f.write(appid)
+            deadline = time.time() + 8
+            result = None
+            while time.time() < deadline:
+                time.sleep(0.4)
+                try:
+                    with open(resp_file, encoding="utf-8") as f:
+                        result = json.loads(f.read())
+                    break
+                except (OSError, ValueError):
+                    continue
+            self._json(result or {"error": "timeout — service context "
+                               "unavailable (check agent injection)"})
+        elif path == "/api/files":
+            import urllib.parse
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
+                                       if "?" in self.path else "")
+            appid = (qs.get("appid") or [""])[0]
+            outdir = ensure_unpacked(appid)
+            files = []
+            for dirpath, _dirnames, filenames in os.walk(outdir):
+                for fn in filenames:
+                    if fn.endswith((".js", ".json")):
+                        rel = os.path.relpath(os.path.join(dirpath, fn),
+                                              outdir)
+                        files.append(rel)
+            files.sort()
+            self._json({"appid": appid, "files": files[:400]})
+        elif path == "/api/source":
+            import urllib.parse
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
+                                       if "?" in self.path else "")
+            appid = (qs.get("appid") or [""])[0]
+            fname = (qs.get("file") or ["app-service.js"])[0]
+            content = read_source(appid, fname)
+            if content is None:
+                self._json({"error": f"file not found: {fname} "
+                                     f"(needs unpacked package)"})
+            else:
+                self._json({"appid": appid, "file": fname,
+                            "lines": content.splitlines()})
         elif path == "/api/open_devtools":
             # target_id passed as query param
             tid = self.path.split("target_id=")[1].split("&")[0] if "target_id=" in self.path else ""
@@ -195,6 +251,38 @@ def recent_events(limit=200, since=0.0):
         return out[-limit:]
     except FileNotFoundError:
         return []
+
+
+def ensure_unpacked(appid):
+    """Auto-unpack a mini-program's plaintext wxapkg for the source tab."""
+    outdir = f"/tmp/wechat_rea/mp_{appid}"
+    if os.path.isdir(outdir) and \
+            os.path.exists(os.path.join(outdir, "app-service.js")):
+        return outdir
+    try:
+        subprocess.run([sys.executable, "-u", os.path.join(ROOT, "unpack_mp.py"),
+                        appid, outdir],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       cwd=ROOT, timeout=60)
+    except Exception:
+        pass
+    return outdir
+
+
+def read_source(appid, fname):
+    """Return source file content for a mini-program (path-safe)."""
+    outdir = ensure_unpacked(appid)
+    safe = os.path.normpath(fname).lstrip("/")
+    if ".." in safe.split(os.sep):
+        return None
+    path = os.path.join(outdir, safe)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read(4 * 1024 * 1024)
+    except OSError:
+        return None
 
 
 def auto_manage():

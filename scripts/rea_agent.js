@@ -1,41 +1,50 @@
-// __REA__ agent — designed for injection into the mini-program service
-// context once we locate the native evaluate primitive.
+// __REA__ agent v2 — injected into the mini-program service context.
 //
-// Captures (stored in globalThis.__REA__.events, polled by the host):
-//   - wx.request / wx.uploadFile calls with url/method/data/headers
-//   - success/fail responses with status + truncated body
-//   - console.log/warn/error/info
-//   - uncaught errors
+// Captures into globalThis.__REA__.events (polled by service_session.py):
+//   request/response/fail  — wx.request family with full detail
+//   console                — log/warn/error/info incl. Error stacks
+//   route                  — page route changes
+//   storage_change         — wx.setStorageSync/remove/clear
+//   error                  — wx.onError
+// Commands (call via Runtime.evaluate):
+//   __REA__.dumpStorage()  -> {keys:[], kv:{}}
+//   __REA__.drain(n)       -> events array (and clears)
 (function () {
-  if (typeof globalThis.__REA__ !== 'undefined') return;
+  if (typeof globalThis.__REA__ !== 'undefined' &&
+      globalThis.__REA__.version >= 2) return;
 
   var events = [];
-  var MAX = 2000;
+  var MAX = 3000;
   function report(type, data) {
-    if (events.length >= MAX) events.shift();
+    if (events.length >= MAX) events.splice(0, events.length - MAX);
     events.push({ t: Date.now(), type: type, data: data });
   }
 
   function shallow(x, n) {
     try {
-      var s = typeof x === 'object' ? JSON.stringify(x) : String(x);
+      if (x instanceof Error) {
+        return { __err: true, name: x.name, message: x.message,
+                 stack: String(x.stack || '').slice(0, 1500) };
+      }
+      var s = typeof x === 'object' && x !== null
+        ? JSON.stringify(x) : String(x);
       return s.length > n ? s.slice(0, n) + '…' : s;
     } catch (e) { return '[unserializable]'; }
   }
 
   // ---- wx.request family ----
-  function wrapRequest(name, makeTask) {
+  function wrapRequest(name) {
     try {
       if (typeof wx === 'undefined' || !wx[name]) return;
       var orig = wx[name].bind(wx);
       wx[name] = function (opts) {
         opts = opts || {};
-        var id = events.length;
+        var id = Date.now() % 1e9 + '-' + events.length;
         report('request', {
           id: id, api: name, url: opts.url,
           method: opts.method || 'GET',
-          data: shallow(opts.data, 2000),
-          header: shallow(opts.header, 800),
+          data: shallow(opts.data, 3000),
+          header: shallow(opts.header, 1000),
         });
         var wrapped = Object.assign({}, opts);
         wrapped.success = function (res) {
@@ -43,15 +52,14 @@
           report('response', {
             id: id, api: name, url: opts.url,
             status: res.statusCode,
-            data: shallow(res.data, 4000),
+            header: shallow(res.header, 1000),
+            data: shallow(res.data, 8000),
           });
           if (opts.success) opts.success(res);
         };
         wrapped.fail = function (err) {
-          report('fail', {
-            id: id, api: name, url: opts.url,
-            err: shallow(err, 500),
-          });
+          report('fail', { id: id, api: name, url: opts.url,
+                           err: shallow(err, 800) });
           if (opts.fail) opts.fail(err);
         };
         return orig(wrapped);
@@ -62,13 +70,13 @@
   wrapRequest('uploadFile');
   wrapRequest('downloadFile');
 
-  // ---- console ----
+  // ---- console with Error stack capture ----
   ['log', 'warn', 'error', 'info'].forEach(function (m) {
     try {
       var o = console[m] ? console[m].bind(console) : function () { };
       console[m] = function () {
         var args = [].slice.call(arguments).map(function (x) {
-          return shallow(x, 500);
+          return shallow(x, 800);
         });
         report('console', { level: m, args: args });
         o.apply(null, arguments);
@@ -76,10 +84,59 @@
     } catch (e) { }
   });
 
-  // ---- errors ----
-  if (typeof wx !== 'undefined' && wx.onError) {
-    wx.onError(function (msg) { report('error', { msg: shallow(msg, 800) }); });
+  // ---- route tracking ----
+  var lastRoute = '';
+  function checkRoute() {
+    try {
+      var ps = typeof getCurrentPages === 'function' && getCurrentPages();
+      var r = ps && ps.length ? ps[ps.length - 1].route : '';
+      if (r && r !== lastRoute) {
+        lastRoute = r;
+        report('route', { route: r });
+      }
+    } catch (e) { }
   }
+  setInterval(checkRoute, 2000);
 
-  globalThis.__REA__ = { events: events, version: 1, boot: Date.now() };
+  // ---- storage ----
+  ['setStorageSync', 'removeStorageSync', 'clearStorageSync'].forEach(
+    function (m) {
+      try {
+        var orig = wx[m] && wx[m].bind(wx);
+        if (!orig) return;
+        wx[m] = function (k, v) {
+          report('storage_change', {
+            op: m === 'setStorageSync' ? 'set' :
+                m === 'removeStorageSync' ? 'remove' : 'clear',
+            key: typeof k === 'string' ? k : '',
+            value: m === 'setStorageSync' ? shallow(v, 1500) : undefined,
+          });
+          return orig.apply(null, arguments);
+        };
+      } catch (e) { }
+    });
+
+  // ---- errors ----
+  try {
+    wx.onError(function (msg) { report('error', { msg: shallow(msg, 2000) }); });
+  } catch (e) { }
+
+  globalThis.__REA__ = {
+    events: events, version: 2, boot: Date.now(),
+    dumpStorage: function () {
+      try {
+        var info = wx.getStorageInfoSync();
+        var kv = {};
+        (info.keys || []).slice(0, 100).forEach(function (k) {
+          kv[k] = shallow(wx.getStorageSync(k), 2000);
+        });
+        return { keys: info.keys || [], currentSize: info.currentSize,
+                 limitSize: info.limitSize, kv: kv };
+      } catch (e) { return { err: String(e) }; }
+    },
+    drain: function (n) {
+      var out = events.splice(0, n || events.length);
+      return out;
+    },
+  };
 })();

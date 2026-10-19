@@ -24,8 +24,19 @@ GW_PORT = 9333
 LOGDIR = ("/Users/yangyiming/Library/Application Support/微信开发者工具/"
           "d1e8765721a6c23d43b14c95b1843e6b/WeappLog/logs")
 AGENT_EVENTS = "/tmp/wechat_rea/service_events.jsonl"
+GW_LOG = "/tmp/wechat_rea/gateway.log"
 
 TARGET_CACHE = []
+
+
+def _log(msg):
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    try:
+        with open(GW_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def find_bridge_port():
@@ -126,7 +137,7 @@ class NetInjector:
         self.appid = appid
         self.bodies = {}          # requestId -> {req, resp, mime}
         self.offset = self._eof()
-        self.active = False
+        self.active = True
 
     @staticmethod
     def _eof():
@@ -291,11 +302,13 @@ async def proxy_session(front_ws, target_id, bridge_port):
                     continue
                 if method == "Network.enable":
                     appid = appid_of_target(target_id)
+                    if not appid:
+                        await refresh_targets(bridge_port)
+                        appid = appid_of_target(target_id)
                     if appid and not injector:
                         injector = NetInjector(front_ws, appid)
                         feeder = asyncio.create_task(injector.loop())
-                        print(f"[gw] network injection ON for {appid}",
-                              flush=True)
+                        _log(f"network injection ON for {appid}")
                 d["sessionId"] = session
                 await back.send(json.dumps(d))
 

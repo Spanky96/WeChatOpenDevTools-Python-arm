@@ -63,11 +63,28 @@ _targets_cache = {"ts": 0.0, "data": None}
 
 
 async def get_targets_cached():
-    """Bridge lookups are expensive and the bridge is fragile — cache 4s."""
+    """Read targets from the session daemon's status (ZERO bridge load —
+    the bridge degrades under frequent connections and self-heals only
+    after quiet periods)."""
     now = time.time()
-    if _targets_cache["data"] is not None and now - _targets_cache["ts"] < 4:
+    if _targets_cache["data"] is not None and now - _targets_cache["ts"] < 5:
         return _targets_cache["data"]
-    data = await get_targets()
+    data = None
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:8778/status",
+                                    timeout=3) as r:
+            st = json.loads(r.read())
+        data = {"bridge": find_bridge_port(),
+                "targets": [t for t in st.get("targets", [])
+                            if t.get("appid")]}
+        if not data["targets"]:
+            data = None   # daemon not ready yet
+    except Exception:
+        data = None
+    if data is None:
+        # daemon not up yet — DO NOT touch the bridge from the poll path
+        data = {"bridge": find_bridge_port(), "targets": []}
     _targets_cache["ts"], _targets_cache["data"] = now, data
     return data
 

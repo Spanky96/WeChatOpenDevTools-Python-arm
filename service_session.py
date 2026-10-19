@@ -15,6 +15,7 @@ Events are appended to /tmp/wechat_rea/service_events.jsonl, which is
 rotated at startup (each debug session starts clean).
 """
 import asyncio
+import fcntl
 import glob
 import json
 import os
@@ -35,6 +36,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 CTRL_PORT = 8778
 
 MP = {}            # appid -> {sid, ctx, scripts, paused, topFrame, bps, fails}
+TARGETS_CACHE = []
 ws_ref = {}
 _loop = None
 _ctrl_queue = None  # asyncio.Queue of (req, done_event, result_box)
@@ -158,8 +160,12 @@ DUMP_STORAGE_JS = (
 
 
 async def setup_targets(br):
-    r = await br.cmd("Target.getTargets")
-    pages = [t for t in r.get("targetInfos", [])
+    r = await br.cmd("Target.getTargets", timeout=6)
+    if not isinstance(r, dict) or "_err" in r or "targetInfos" not in r:
+        raise ConnectionError("bridge getTargets failed — reconnect")
+    global TARGETS_CACHE
+    TARGETS_CACHE = r.get("targetInfos", [])
+    pages = [t for t in TARGETS_CACHE
              if t["type"] == "page" and "servicewechat.com/wx" in
              t.get("url", "")]
     agent = open(os.path.join(ROOT, "scripts", "rea_agent.js")).read()
@@ -171,7 +177,7 @@ async def setup_targets(br):
         if appid in MP:
             continue
         a = await br.cmd("Target.attachToTarget", targetId=t["targetId"],
-                         flatten=True)
+                         flatten=True, timeout=6)
         sid = a.get("sessionId") if isinstance(a, dict) else None
         if not sid:
             continue
@@ -182,7 +188,7 @@ async def setup_targets(br):
         svc = None
         for c in ctxs:
             if await eval_js(br, sid, c.get("id"), "typeof wx",
-                             timeout=4) == "object":
+                             timeout=3) == "object":
                 svc = c.get("id")
                 break
         if svc is None:
@@ -190,7 +196,7 @@ async def setup_targets(br):
             continue
         has = await eval_js(br, sid, svc, "typeof __REA__", timeout=4)
         if has != "object":
-            await eval_js(br, sid, svc, agent, timeout=12)
+            await eval_js(br, sid, svc, agent, timeout=9)
             print(f"[sess] agent injected -> {appid}", flush=True)
         # NOTE: Debugger.enable stays OFF by default — enabling it on the
         # service context stalls live event capture (observed 2026-10-19).
@@ -205,6 +211,23 @@ async def setup_targets(br):
         del MP[a]
 
 
+async def refresh_ctx(br, v):
+    """Re-discover the service context (contexts change on page
+    recreation; stale contextId makes every evaluate silently fail)."""
+    await br.cmd("Runtime.enable", v["sid"], timeout=5)
+    evs = await br.drain(1.0)
+    ctxs = [e["params"]["context"] for e in evs
+            if e.get("method") == "Runtime.executionContextCreated"]
+    for c in ctxs:
+        if await eval_js(br, v["sid"], c.get("id"), "typeof wx",
+                         timeout=4) == "object":
+            if c.get("id") != v["ctx"]:
+                print(f"[sess] ctx refreshed -> {c.get('id')}", flush=True)
+            v["ctx"] = c.get("id")
+            return True
+    return False
+
+
 async def poll_agent(br, appid):
     """True=ok, False=should drop (after 3 consecutive failures)."""
     v = MP[appid]
@@ -213,7 +236,23 @@ async def poll_agent(br, appid):
             br, v["sid"], v["ctx"],
             "(function(){if(typeof __REA__!=='object')return 'DEAD';"
             "if(!__REA__.drain)return 'V1';"
-            "return JSON.stringify(__REA__.drain(200))})()", timeout=6)
+            "return JSON.stringify(__REA__.drain(200))})()", timeout=5)
+        if raw is None:
+            # stale context (page recreated) — rediscover and retry once
+            if await refresh_ctx(br, v):
+                raw = await eval_js(
+                    br, v["sid"], v["ctx"],
+                    "(function(){if(typeof __REA__!=='object')return 'DEAD';"
+                    "if(!__REA__.drain)return 'V1';"
+                    "return JSON.stringify(__REA__.drain(200))})()",
+                    timeout=6)
+        if raw is None:
+            v["fails"] += 1
+            print(f"[sess] poll {appid}: eval dead ({v['fails']})",
+                  flush=True)
+            if v["fails"] >= 2:
+                raise ConnectionError("bridge degraded — reconnect")
+            return True
         if raw == "DEAD":
             v["fails"] += 1
             if v["fails"] >= 3:
@@ -223,7 +262,7 @@ async def poll_agent(br, appid):
         if raw == "V1":
             raw = await eval_js(
                 br, v["sid"], v["ctx"],
-                "JSON.stringify(__REA__.events.splice(0,200))", timeout=6)
+                "JSON.stringify(__REA__.events.splice(0,200))", timeout=5)
         events = json.loads(raw) if isinstance(raw, str) else []
         for e in events if isinstance(events, list) else []:
             if isinstance(e, dict):
@@ -309,18 +348,24 @@ async def process_ctrl(br, req):
                 r = await br.cmd("Debugger.evaluateOnCallFrame", v["sid"],
                                  callFrameId=v["topFrame"],
                                  expression=code, returnByValue=True,
-                                 silent=True, timeout=10)
+                                 silent=True, timeout=6)
                 val = ((r or {}).get("result") or {}).get("value")
                 if isinstance(r, dict) and "_err" in r:
                     return {"ok": False, "frame": True,
                             "value": str(r.get("_err"))}
                 return {"ok": True, "frame": True, "value": val}
-            val = await eval_js(br, v["sid"], v["ctx"],
-                                "(function(){try{var r=(" + code +
-                                ");r=(r===undefined?'undefined':r);"
-                                "return JSON.stringify({ok:true,r:r})}"
-                                "catch(e){return JSON.stringify("
-                                "{ok:false,e:String(e)})}})()", timeout=10)
+            wrapped = ("(function(){try{var r=(" + code +
+                       ");r=(r===undefined?'undefined':r);"
+                       "return JSON.stringify({ok:true,r:r})}"
+                       "catch(e){return JSON.stringify("
+                       "{ok:false,e:String(e)})}})()")
+            val = await eval_js(br, v["sid"], v["ctx"], wrapped, timeout=5)
+            if val is None and await refresh_ctx(br, v):
+                val = await eval_js(br, v["sid"], v["ctx"], wrapped,
+                                    timeout=5)
+            if val is None:
+                return {"ok": False, "frame": False, "value": None,
+                        "debug": "ctx dead after refresh"}
             return {"ok": True, "frame": False, "value": val}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -373,7 +418,7 @@ async def legacy_file_requests(br):
                 if want and appid != want:
                     continue
                 res = await eval_js(br, v["sid"], v["ctx"],
-                                    DUMP_STORAGE_JS, timeout=12)
+                                    DUMP_STORAGE_JS, timeout=8)
                 try:
                     with open(STORAGE_RESP, "w", encoding="utf-8") as f:
                         f.write(json.dumps({
@@ -416,11 +461,17 @@ class CtrlHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] == "/status":
-            self._json({a: {"debugger": True,
-                            "scripts": list(v["scripts"].keys())[:20],
-                            "paused": v["paused"],
-                            "bps": list(v.get("bps", {}).keys())}
-                        for a, v in MP.items()})
+            self._json({"targets": [{"appid": (re.search(r"(wx[0-9a-f]{16})", t.get("url", "")) or [None, None])[1],
+                                     "url": t.get("url", "")[:90],
+                                     "targetId": t.get("targetId")}
+                                    for t in TARGETS_CACHE
+                                    if t.get("type") == "page" and
+                                    "servicewechat.com/wx" in t.get("url", "")],
+                        "mps": {a: {"debugger": True,
+                                    "scripts": list(v["scripts"].keys())[:20],
+                                    "paused": v["paused"],
+                                    "bps": list(v.get("bps", {}).keys())}
+                                for a, v in MP.items()}})
         else:
             self._json({})
 
@@ -446,7 +497,7 @@ async def run_session(port):
                     await asyncio.sleep(4)
                     continue
                 stale_cycles = 0
-                for _ in range(8):   # ~12s between rescans
+                for _ in range(20):  # ~30s between rescans
                     await asyncio.sleep(1.5)
                     await legacy_file_requests(br)
                     activity = False
@@ -466,6 +517,13 @@ async def run_session(port):
 async def main():
     global _loop, _ctrl_queue
     os.makedirs("/tmp/wechat_rea", exist_ok=True)
+    # single-instance lock (start.py respawns; duplicates fight for :8778)
+    lock = open("/tmp/wechat_rea/sess.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("[sess] another instance holds the lock, exiting", flush=True)
+        return
     # rotate events: each session starts clean
     try:
         if os.path.exists(EVENTS):

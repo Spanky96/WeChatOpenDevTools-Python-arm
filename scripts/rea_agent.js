@@ -11,7 +11,7 @@
 //   __REA__.drain(n)       -> events array (and clears)
 (function () {
   if (typeof globalThis.__REA__ !== 'undefined' &&
-      globalThis.__REA__.version >= 4) return;
+      globalThis.__REA__.version >= 5) return;
 
   var events = [];
   var MAX = 3000;
@@ -87,7 +87,11 @@
         var args = [].slice.call(arguments).map(function (x) {
           return shallow(x, 800);
         });
-        report('console', { level: m, args: args });
+        // skip our own hub-retry noise (avoid feedback spam)
+        var joined = args.join(' ');
+        if (joined.indexOf('127.0.0.1:8779') < 0) {
+          report('console', { level: m, args: args });
+        }
         o.apply(null, arguments);
       };
     } catch (e) { }
@@ -167,7 +171,7 @@
   connectHub();
 
   globalThis.__REA__ = {
-    events: events, version: 4, boot: Date.now(),
+    events: events, version: 5, boot: Date.now(),
     push: function (batch) {
       if (sockOpen && sock) {
         try { sock.send({ data: JSON.stringify({ events: batch }) }); }

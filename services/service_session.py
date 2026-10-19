@@ -675,16 +675,15 @@ async def main():
                 refused = 0
                 cand_idx = 0
             except Exception as exc:
-                ename = type(exc).__name__
-                if ("RefusedError" in ename or
-                        "Connect call failed" in str(exc) or
-                        "getTargets failed" in str(exc)):
-                    refused += 1
-                    if refused >= 2 and cands:
-                        cand_idx += 1      # rotate (refused OR zombie relay)
-                        refused = 0
-                        print(f"[sess] rotating to port "
-                              f"{cands[cand_idx % len(cands)]}", flush=True)
+                # rotate on ANY failure type after 2 tries — wrong ports
+                # refuse (RefusedError), reject (500), or hang (timeout)
+                refused += 1
+                if refused >= 2 and len(cands) > 1:
+                    cand_idx += 1
+                    refused = 0
+                    print(f"[sess] rotating to port "
+                          f"{cands[cand_idx % len(cands)]} "
+                          f"(after {type(exc).__name__})", flush=True)
                 print(f"[sess] session ended: {type(exc).__name__} "
                       f"{str(exc)[:80]}", flush=True)
         await asyncio.sleep(3)

@@ -327,9 +327,10 @@ function renderConsole(){
   const box=document.getElementById('console-scroll');
   const q=(document.getElementById('con-filter').value||'').toLowerCase();
   const lines=(state.con[state.selected]||[]).filter(e=>{
+    const raw=JSON.stringify(e.data||{});
+    if(raw.includes('8779/agent')) return false;   // hub retry noise
     if(!q) return true;
-    const d=e.data||{};
-    return JSON.stringify(d).toLowerCase().includes(q);
+    return raw.toLowerCase().includes(q);
   }).slice(-200);
   document.getElementById('con-count').textContent=`${lines.length} 条`;
   box.innerHTML=lines.map(e=>{

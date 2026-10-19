@@ -168,7 +168,6 @@ async def setup_targets(br):
     pages = [t for t in TARGETS_CACHE
              if t["type"] == "page" and "servicewechat.com/wx" in
              t.get("url", "")]
-    agent = open(os.path.join(ROOT, "scripts", "rea_agent.js")).read()
     seen = set()
     for t in pages:
         am = re.search(r"(wx[0-9a-f]{16})", t.get("url", ""))

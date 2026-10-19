@@ -105,21 +105,24 @@
   }
   setInterval(checkRoute, 2000);
 
-  // ---- storage ----
+  // ---- storage (same writable:false trap — use defineProperty) ----
   ['setStorageSync', 'removeStorageSync', 'clearStorageSync'].forEach(
     function (m) {
       try {
-        var orig = wx[m] && wx[m].bind(wx);
-        if (!orig) return;
-        wx[m] = function (k, v) {
+        var orig = wx[m];
+        if (!orig || orig.__reaWrapped) return;
+        function wrappedS(k, v) {
           report('storage_change', {
             op: m === 'setStorageSync' ? 'set' :
                 m === 'removeStorageSync' ? 'remove' : 'clear',
             key: typeof k === 'string' ? k : '',
             value: m === 'setStorageSync' ? shallow(v, 1500) : undefined,
           });
-          return orig.apply(null, arguments);
-        };
+          return orig.apply(wx, arguments);
+        }
+        wrappedS.__reaWrapped = true;
+        Object.defineProperty(wx, m, { value: wrappedS, writable: true,
+                                      configurable: true });
       } catch (e) { }
     });
 

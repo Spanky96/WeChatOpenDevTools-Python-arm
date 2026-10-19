@@ -266,7 +266,8 @@ async def poll_agent(br, appid):
         events = json.loads(raw) if isinstance(raw, str) else []
         for e in events if isinstance(events, list) else []:
             if isinstance(e, dict):
-                emit({"t": time.time(), "appid": appid, **e})
+                # e carries the agent's own "t" (ms) — ours must win (sec)
+                emit({**e, "t": time.time(), "appid": appid})
                 d = e.get("data") if isinstance(e.get("data"), dict) else {}
                 head = (d.get("url") or d.get("route") or d.get("level") or
                         d.get("msg") or d.get("op") or "")

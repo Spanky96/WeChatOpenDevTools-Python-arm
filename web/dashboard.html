@@ -202,7 +202,7 @@ let state = {
 };
 function dot(id,on){document.getElementById(id).className='dot '+(on?'on':'off');}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function ts(t){const d=new Date((t||0)*1000);return d.toTimeString().slice(0,8);}
+function ts(t){t=Number(t)||0;if(t>1e12)t/=1000;const d=new Date(t*1000);return d.toTimeString().slice(0,8);}
 
 /* ---------- app selector ---------- */
 function renderApps(targets){

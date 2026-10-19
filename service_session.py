@@ -431,19 +431,32 @@ async def run_session(port):
         br = Br(ws)
         await br.start()
         ctrl_task = asyncio.create_task(ctrl_loop(br))
+        stale_cycles = 0
         try:
             while True:
                 await setup_targets(br)
                 if not MP:
+                    stale_cycles += 1
+                    if stale_cycles >= 6:
+                        # zombie connection: bridge port alive but serves
+                        # nothing — force reconnect
+                        print("[sess] stale bridge, reconnecting",
+                              flush=True)
+                        return
                     await asyncio.sleep(4)
                     continue
+                stale_cycles = 0
                 for _ in range(8):   # ~12s between rescans
                     await asyncio.sleep(1.5)
                     await legacy_file_requests(br)
+                    activity = False
                     for appid in list(MP):
-                        if not await poll_agent(br, appid):
+                        ok = await poll_agent(br, appid)
+                        if not ok:
                             print(f"[sess] drop {appid}", flush=True)
                             del MP[appid]
+                        else:
+                            activity = True
                     if not MP:
                         break
         finally:

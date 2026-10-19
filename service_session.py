@@ -242,14 +242,14 @@ async def setup_targets(br):
             print(f"[sess] {appid}: no service ctx", flush=True)
             FAILED_CTX[appid] = time.time()
             continue
-        has = await eval_js(br, sid, svc,
-                            "typeof __REA__+'/'+(__REA__?__REA__.version:0)",
-                            timeout=4)
-        if has != "object/4":
-            agent_src = open(os.path.join(
-                ROOT, "scripts", "rea_agent.js")).read()
-            await eval_js(br, sid, svc, agent_src, timeout=9)
-            print(f"[sess] agent injected -> {appid}", flush=True)
+        # ALWAYS re-evaluate the agent (idempotent: v4 IIFE early-returns
+        # if present). Page reloads after bridge restarts create fresh
+        # contexts with no instrumentation — this guarantees coverage.
+        agent_src = open(os.path.join(
+            ROOT, "scripts", "rea_agent.js")).read()
+        chk = await eval_js(br, sid, svc, "typeof __REA__", timeout=4)
+        await eval_js(br, sid, svc, agent_src, timeout=9)
+        print(f"[sess] agent ensured ({chk}) -> {appid}", flush=True)
         # NOTE: Debugger.enable stays OFF by default — enabling it on the
         # service context stalls live event capture (observed 2026-10-19).
         # It is enabled on demand by the first /breakpoint request.

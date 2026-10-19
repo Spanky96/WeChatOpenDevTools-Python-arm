@@ -11,7 +11,7 @@
 //   __REA__.drain(n)       -> events array (and clears)
 (function () {
   if (typeof globalThis.__REA__ !== 'undefined' &&
-      globalThis.__REA__.version >= 2) return;
+      globalThis.__REA__.version >= 3) return;
 
   var events = [];
   var MAX = 3000;
@@ -33,11 +33,14 @@
   }
 
   // ---- wx.request family ----
+  // wx.request is writable:false (but configurable:true) — plain
+  // assignment silently fails; must use Object.defineProperty.
   function wrapRequest(name) {
     try {
       if (typeof wx === 'undefined' || !wx[name]) return;
-      var orig = wx[name].bind(wx);
-      wx[name] = function (opts) {
+      var orig = wx[name];
+      if (orig.__reaWrapped) return;
+      function wrapped(opts) {
         opts = opts || {};
         var id = Date.now() % 1e9 + '-' + events.length;
         report('request', {
@@ -46,8 +49,8 @@
           data: shallow(opts.data, 3000),
           header: shallow(opts.header, 1000),
         });
-        var wrapped = Object.assign({}, opts);
-        wrapped.success = function (res) {
+        var w = Object.assign({}, opts);
+        w.success = function (res) {
           res = res || {};
           report('response', {
             id: id, api: name, url: opts.url,
@@ -57,13 +60,17 @@
           });
           if (opts.success) opts.success(res);
         };
-        wrapped.fail = function (err) {
+        w.fail = function (err) {
           report('fail', { id: id, api: name, url: opts.url,
                            err: shallow(err, 800) });
           if (opts.fail) opts.fail(err);
         };
-        return orig(wrapped);
-      };
+        return orig.call(wx, w);
+      }
+      wrapped.__reaWrapped = true;
+      Object.defineProperty(wx, name,
+                            { value: wrapped, writable: true,
+                              configurable: true });
     } catch (e) { }
   }
   wrapRequest('request');
@@ -122,7 +129,7 @@
   } catch (e) { }
 
   globalThis.__REA__ = {
-    events: events, version: 2, boot: Date.now(),
+    events: events, version: 3, boot: Date.now(),
     dumpStorage: function () {
       try {
         var info = wx.getStorageInfoSync();

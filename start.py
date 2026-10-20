@@ -11,6 +11,8 @@ import asyncio
 import json
 import os
 import re
+import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -26,6 +28,11 @@ GATEWAY_PORT = 9333
 
 LOGDIR = ("/Users/yangyiming/Library/Application Support/微信开发者工具/"
           "d1e8765721a6c23d43b14c95b1843e6b/WeappLog/logs")
+SNIPER_LOCK = "/tmp/wechat_rea/sniper.lock"
+SESS_LOCK = "/tmp/wechat_rea/sess.lock"
+SESSION_PORT = 8778
+SERVICE_SCRIPTS = ("sniper.py", "cdp_gateway.py", "service_session.py")
+MANAGER_PID_FILE = "/tmp/wechat_rea/start.pid"
 
 # --- process management ---
 _children = {}
@@ -37,11 +44,149 @@ def spawn(name, script, *args):
         return False
     cmd = [sys.executable, "-u", os.path.join(ROOT, script)] + list(args)
     os.makedirs("/tmp/wechat_rea", exist_ok=True)
-    logf = open(f"/tmp/wechat_rea/managed_{name}.log", "a", buffering=1)
-    _children[name] = subprocess.Popen(
-        cmd, stdout=logf, stderr=subprocess.STDOUT,
-        cwd=ROOT, start_new_session=True)
+    with open(f"/tmp/wechat_rea/managed_{name}.log", "a", buffering=1) as logf:
+        _children[name] = subprocess.Popen(
+            cmd, stdout=logf, stderr=subprocess.STDOUT,
+            cwd=ROOT, start_new_session=True)
     return True
+
+
+def _lsof_pids(*args):
+    try:
+        out = subprocess.run(["lsof", "-t"] + list(args),
+                             capture_output=True, text=True, timeout=5).stdout
+        return [int(p) for p in out.split() if p.isdigit()]
+    except Exception:
+        return []
+
+
+def _process_command(pid):
+    try:
+        return subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                              capture_output=True, text=True,
+                              timeout=5).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _service_pids():
+    """Find service processes even when lsof cannot report advisory locks."""
+    try:
+        out = subprocess.run(["ps", "ax", "-o", "pid=,command="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return []
+    pids = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid, cmd = int(parts[0]), parts[1]
+        if pid != os.getpid() and _is_service_command(cmd):
+            pids.append(pid)
+    return pids
+
+
+def _is_orphan_service(pid):
+    return _is_service_command(_process_command(pid))
+
+
+def _is_service_command(cmd):
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return False
+    if not argv or not os.path.basename(argv[0]).lower().startswith("python"):
+        return False
+    paths = {os.path.join(ROOT, parent, script)
+             for parent in ("", "services") for script in SERVICE_SCRIPTS}
+    return any(arg in paths for arg in argv[1:])
+
+
+def _process_cwd(pid):
+    try:
+        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd"],
+                             capture_output=True, text=True, timeout=5).stdout
+        parts = out.strip().split()
+        return parts[-1] if parts else ""
+    except Exception:
+        return ""
+
+
+def _is_previous_manager(pid):
+    if not pid or pid == os.getpid():
+        return False
+    cmd = _process_command(pid)
+    if "start.py" not in cmd:
+        return False
+    return ROOT in cmd or _process_cwd(pid) == ROOT
+
+
+def stop_previous_manager():
+    """Stop an older start.py manager so it cannot respawn killed services."""
+    try:
+        with open(MANAGER_PID_FILE, encoding="ascii") as f:
+            old = int(f.read().strip())
+    except (OSError, ValueError):
+        return
+    if not _is_previous_manager(old):
+        return
+    try:
+        os.kill(old, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    for _ in range(50):
+        try:
+            os.kill(old, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    try:
+        os.kill(old, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def write_manager_pid():
+    os.makedirs("/tmp/wechat_rea", exist_ok=True)
+    with open(MANAGER_PID_FILE, "w", encoding="ascii") as f:
+        f.write(str(os.getpid()))
+
+
+def cleanup_stale_services():
+    """Drop older service daemons before this manager binds their ports."""
+    pids = set(_lsof_pids("-nP", "-iTCP:%d" % GATEWAY_PORT, "-sTCP:LISTEN"))
+    pids.update(_lsof_pids("-nP", "-iTCP:%d" % SESSION_PORT, "-sTCP:LISTEN"))
+    pids.update(_lsof_pids(SNIPER_LOCK, SESS_LOCK))
+    pids.update(_service_pids())
+    for pid in sorted(pids):
+        if not _is_orphan_service(pid):
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            continue
+
+    # Sniper does not bind a TCP port, but its lock must be released first.
+    for _ in range(40):
+        leftover = set(_lsof_pids(SNIPER_LOCK, SESS_LOCK))
+        for pid in sorted(leftover):
+            if _is_orphan_service(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        if not leftover:
+            break
+        time.sleep(0.1)
+
+    # Gateway must be gone before the new process can bind :9333.
+    for _ in range(40):
+        if not _lsof_pids("-nP", "-iTCP:%d" % GATEWAY_PORT, "-sTCP:LISTEN"):
+            return
+        time.sleep(0.1)
 
 
 def find_bridge_port():
@@ -69,7 +214,7 @@ async def get_targets_cached():
     the bridge degrades under frequent connections and self-heals only
     after quiet periods)."""
     now = time.time()
-    if _targets_cache["data"] is not None and now - _targets_cache["ts"] < 5:
+    if _targets_cache["data"] is not None and now - _targets_cache["ts"] < 0.5:
         return _targets_cache["data"]
     data = None
     try:
@@ -81,8 +226,6 @@ async def get_targets_cached():
                 "bridge_state": st.get("bridge_state", "?"),
                 "targets": [t for t in st.get("targets", [])
                             if t.get("appid")]}
-        if not data["targets"]:
-            data = None   # daemon not ready yet
     except Exception:
         data = None
     if data is None:
@@ -145,8 +288,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             result = asyncio.run(get_targets_cached())
             sniper_alive = _children.get("sniper") and _children["sniper"].poll() is None
-            gateway_alive = _children.get("gateway") and _children["gateway"].poll() is None
-            sess_alive = _children.get("sess") and _children["sess"].poll() is None
+            gateway_alive = (_children.get("gateway") and
+                             _children["gateway"].poll() is None and
+                             bool(_lsof_pids("-nP", "-iTCP:%d" % GATEWAY_PORT,
+                                             "-sTCP:LISTEN")))
+            sess_alive = (_children.get("sess") and
+                          _children["sess"].poll() is None and
+                          bool(_lsof_pids("-nP", "-iTCP:%d" % SESSION_PORT,
+                                          "-sTCP:LISTEN")))
             self._json({
                 **result,
                 "sniper": bool(sniper_alive),
@@ -242,11 +391,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"appid": appid, "file": fname,
                             "lines": content.splitlines()})
         elif path == "/api/open_devtools":
-            # target_id passed as query param
-            tid = self.path.split("target_id=")[1].split("&")[0] if "target_id=" in self.path else ""
-            if tid:
+            from urllib.parse import parse_qs, urlsplit
+            qs = parse_qs(urlsplit(self.path).query)
+            tid = qs.get("target_id", [""])[0]
+            appid = qs.get("appid", [""])[0]
+            if re.fullmatch(r"[0-9A-Fa-f]+", tid):
                 url = (f"devtools://devtools/bundled/devtools_app.html"
                        f"?ws=127.0.0.1:{GATEWAY_PORT}/devtools/page/{tid}")
+                if re.fullmatch(r"wx[0-9a-f]{16}", appid):
+                    url += "?appid=" + appid
                 # 'open' cmd doesn't support devtools:// — use AppleScript
                 apple = f'tell application "Google Chrome" to open location "{url}"'
                 subprocess.Popen(["osascript", "-e", apple],
@@ -354,6 +507,9 @@ def auto_manage():
 
 def main():
     os.makedirs(WEB_DIR, exist_ok=True)
+    stop_previous_manager()
+    cleanup_stale_services()
+    write_manager_pid()
     threading.Thread(target=auto_manage, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", DASHBOARD_PORT), Handler)
     print(f"\n  🚀 Dashboard: http://127.0.0.1:{DASHBOARD_PORT}/\n")

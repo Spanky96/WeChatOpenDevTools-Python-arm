@@ -15,8 +15,10 @@ Events are appended to /tmp/wechat_rea/service_events.jsonl, which is
 rotated at startup (each debug session starts clean).
 """
 import asyncio
+from collections import OrderedDict
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import re
@@ -39,8 +41,11 @@ CTRL_PORT = 8778
 MP = {}            # appid -> {sid, ctx, scripts, paused, topFrame, bps, fails}
 TARGETS_CACHE = []
 ONLINE = {}        # appid -> last heartbeat/event ts (agent hub, no bridge)
+HUB_VERSION = {}   # appid -> newest injected agent generation
+HUB_SOCKET = {}    # appid -> current agent WebSocket
 BRIDGE = {"state": "connecting", "port": None}   # connecting|up|dead
-FAILED_CTX = {}    # appid -> ts of last ctx-discovery failure (cooldown)
+FAILED_CTX = {}    # targetId -> ts of last context-discovery failure
+SEEN_EVENTS = OrderedDict()
 ws_ref = {}
 _loop = None
 _ctrl_queue = None  # asyncio.Queue of (req, done_event, result_box)
@@ -49,6 +54,22 @@ _ctrl_queue = None  # asyncio.Queue of (req, done_event, result_box)
 def emit(rec):
     with open(EVENTS, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def emit_agent(appid, event):
+    """Deduplicate legacy live-push/flush copies before persisting them."""
+    if event.get("seq") is not None:
+        key = (appid, str(event["seq"]))
+    else:
+        raw = json.dumps(event, sort_keys=True, ensure_ascii=False).encode()
+        key = (appid, hashlib.sha256(raw).digest())
+    if key in SEEN_EVENTS:
+        return
+    SEEN_EVENTS[key] = True
+    if len(SEEN_EVENTS) > 4096:
+        SEEN_EVENTS.popitem(last=False)
+    emit({**event, "agent_t": event.get("t"),
+          "t": time.time(), "appid": appid})
 
 
 def find_port():
@@ -84,26 +105,9 @@ def find_port():
 
 
 def find_port_candidates():
-    """All plausible bridge ports (log + lsof), newest first."""
-    cands = []
+    """Other wechatweb listeners are HTTP services, not backup CDP bridges."""
     p = find_port()
-    if p:
-        cands.append(p)
-    try:
-        out = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
-                             capture_output=True, text=True,
-                             timeout=5).stdout
-        for line in out.splitlines():
-            if "wechatweb" not in line:
-                continue
-            m = re.search(r"127\.0\.0\.1:(\d+)|\*:(\d+)", line)
-            if m:
-                q = int(m.group(1) or m.group(2))
-                if q not in cands and q not in (58001, 62586):
-                    cands.append(q)
-    except Exception:
-        pass
-    return cands
+    return [p] if p else []
 
 
 class Br:
@@ -112,9 +116,10 @@ class Br:
         self._id = 0
         self.wait = {}
         self.buf = []
+        self.reader = None
 
     async def start(self):
-        asyncio.create_task(self._rd())
+        self.reader = asyncio.create_task(self._rd())
 
     async def _rd(self):
         try:
@@ -130,6 +135,11 @@ class Br:
                     self.buf.append(m)
         except Exception:
             pass
+        finally:
+            for fut in self.wait.values():
+                if not fut.done():
+                    fut.set_exception(ConnectionError("bridge disconnected"))
+            self.wait.clear()
 
     async def _on_event(self, m):
         sid = m.get("sessionId")
@@ -177,6 +187,8 @@ class Br:
             r = await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
             return {"_err": "timeout"}
+        finally:
+            self.wait.pop(mid, None)
         return r.get("result", r.get("error"))
 
     async def drain(self, secs):
@@ -221,42 +233,60 @@ async def setup_targets(br):
         appid = am.group(1) if am else "?"
         seen.add(appid)
         if appid in MP:
-            continue
-        if time.time() - FAILED_CTX.get(appid, 0) < 60:
+            if MP[appid].get("targetId") == t["targetId"]:
+                continue
+            del MP[appid]
+        if time.time() - FAILED_CTX.get(t["targetId"], 0) < 60:
             continue   # recently failed — don't churn attach on dead targets
         a = await br.cmd("Target.attachToTarget", targetId=t["targetId"],
                          flatten=True, timeout=6)
         sid = a.get("sessionId") if isinstance(a, dict) else None
         if not sid:
             continue
-        await br.cmd("Runtime.enable", sid)
-        evs = await br.drain(0.8)
-        ctxs = [e["params"]["context"] for e in evs
-                if e.get("method") == "Runtime.executionContextCreated"]
         svc = None
-        for c in ctxs:
-            if await eval_js(br, sid, c.get("id"), "typeof wx",
-                             timeout=3) == "object":
-                svc = c.get("id")
+        # Context-created notifications can arrive after the enable response
+        # on 4.1.13. Give the target a second short window before marking it
+        # failed for the full cooldown period.
+        for attempt in range(2):
+            await br.cmd("Runtime.enable", sid, timeout=5)
+            evs = await br.drain(1.0 if attempt == 0 else 0.8)
+            ctxs = [e["params"]["context"] for e in evs
+                    if e.get("method") == "Runtime.executionContextCreated"
+                    and e.get("sessionId") == sid
+                    and e.get("params", {}).get("context")]
+            for c in ctxs:
+                if await eval_js(br, sid, c.get("id"), "typeof wx",
+                                 timeout=3) == "object":
+                    svc = c.get("id")
+                    break
+            if svc is not None:
                 break
         if svc is None:
             print(f"[sess] {appid}: no service ctx", flush=True)
-            FAILED_CTX[appid] = time.time()
+            FAILED_CTX[t["targetId"]] = time.time()
+            await br.cmd("Target.detachFromTarget", sessionId=sid, timeout=2)
             continue
-        # ALWAYS re-evaluate the agent (idempotent: v4 IIFE early-returns
+        # Re-evaluate the agent (idempotent: its IIFE early-returns
         # if present). Page reloads after bridge restarts create fresh
         # contexts with no instrumentation — this guarantees coverage.
-        agent_src = open(os.path.join(
-            ROOT, "scripts", "rea_agent.js")).read()
+        with open(os.path.join(ROOT, "scripts", "rea_agent.js")) as f:
+            agent_src = f.read()
         chk = await eval_js(br, sid, svc, "typeof __REA__", timeout=4)
-        await eval_js(br, sid, svc, agent_src, timeout=9)
+        version = await eval_js(br, sid, svc,
+                               agent_src + "\n;globalThis.__REA__.version", timeout=9)
+        if not isinstance(version, (int, float)) or version < 5:
+            print(f"[sess] agent injection unconfirmed -> {appid}", flush=True)
+            FAILED_CTX[t["targetId"]] = time.time()
+            await br.cmd("Target.detachFromTarget", sessionId=sid, timeout=2)
+            continue
         print(f"[sess] agent ensured ({chk}) -> {appid}", flush=True)
         # NOTE: Debugger.enable stays OFF by default — enabling it on the
         # service context stalls live event capture (observed 2026-10-19).
         # It is enabled on demand by the first /breakpoint request.
-        MP[appid] = {"sid": sid, "ctx": svc, "scripts": {}, "paused": None,
+        MP[appid] = {"sid": sid, "ctx": svc, "targetId": t["targetId"],
+                     "scripts": {}, "paused": None,
                      "topFrame": None, "bps": {}, "fails": 0,
-                     "dbg": False}
+                     "dbg": False, "agent_version": version}
         emit({"t": time.time(), "appid": appid, "type": "attached",
               "data": {"debugger": False}})
     for a in [a for a in MP if a not in seen]:
@@ -270,7 +300,8 @@ async def refresh_ctx(br, v):
     await br.cmd("Runtime.enable", v["sid"], timeout=5)
     evs = await br.drain(1.0)
     ctxs = [e["params"]["context"] for e in evs
-            if e.get("method") == "Runtime.executionContextCreated"]
+            if e.get("method") == "Runtime.executionContextCreated"
+            and e.get("sessionId") == v["sid"]]
     for c in ctxs:
         if await eval_js(br, v["sid"], c.get("id"), "typeof wx",
                          timeout=4) == "object":
@@ -324,7 +355,7 @@ async def poll_agent(br, appid):
         for e in events if isinstance(events, list) else []:
             if isinstance(e, dict):
                 # e carries the agent's own "t" (ms) — ours must win (sec)
-                emit({**e, "t": time.time(), "appid": appid})
+                emit_agent(appid, e)
                 d = e.get("data") if isinstance(e.get("data"), dict) else {}
                 head = (d.get("url") or d.get("route") or d.get("level") or
                         d.get("msg") or d.get("op") or "")
@@ -551,13 +582,16 @@ class CtrlHandler(BaseHTTPRequestHandler):
         if self.path.split("?")[0] == "/status":
             self._json({"bridge_state": BRIDGE["state"],
                         "bridge_port": BRIDGE["port"],
+                        "targetInfos": list(TARGETS_CACHE),
                         "targets": [{"appid": (re.search(r"(wx[0-9a-f]{16})", t.get("url", "")) or [None, None])[1],
                                      "url": t.get("url", "")[:90],
                                      "targetId": t.get("targetId")}
                                     for t in TARGETS_CACHE
                                     if t.get("type") == "page" and
                                     "servicewechat.com/wx" in t.get("url", "")],
-                        "mps": {a: {"debugger": True,
+                        "mps": {a: {"debugger": v.get("dbg", False),
+                                    "agent_online": ONLINE.get(a, 0) > time.time() - 30,
+                                    "agent_version": v.get("agent_version"),
                                     "scripts": list(v["scripts"].keys())[:20],
                                     "paused": v["paused"],
                                     "bps": list(v.get("bps", {}).keys())}
@@ -570,17 +604,29 @@ async def agent_hub(ws):
     """Direct agent connections (wx.connectSocket) — bridge-independent
     event push. This is the primary capture path; bridge polling is only
     a fallback."""
-    m = re.match(r"/agent\?appid=(wx[0-9a-f]{16})", ws.path or "")
+    m = re.match(r"/agent\?appid=(wx[0-9a-f]{16})(?:&v=(\d+))?",
+                 ws.path or "")
     if not m:
         await ws.close()
         return
     appid = m.group(1)
+    version = int(m.group(2) or 0)
+    # Older agents can keep reconnect timers alive after an upgrade. Drain
+    # their sockets quietly; closing them would trigger another retry loop.
+    if version < HUB_VERSION.get(appid, 0):
+        async for _ in ws:
+            pass
+        return
+    HUB_VERSION[appid] = version
+    HUB_SOCKET[appid] = ws
     ONLINE[appid] = time.time()
     print(f"[hub] agent online: {appid}", flush=True)
     emit({"t": time.time(), "appid": appid, "type": "agent_online",
           "data": {}})
     try:
         async for raw in ws:
+            if HUB_SOCKET.get(appid) is not ws:
+                continue
             try:
                 msg = json.loads(raw)
             except ValueError:
@@ -590,10 +636,12 @@ async def agent_hub(ws):
                 continue
             for e in msg.get("events", [])[:500]:
                 if isinstance(e, dict):
-                    emit({**e, "t": time.time(), "appid": appid})
+                    emit_agent(appid, e)
     finally:
-        print(f"[hub] agent offline: {appid}", flush=True)
-        ONLINE[appid] = 0
+        if HUB_SOCKET.get(appid) is ws:
+            HUB_SOCKET.pop(appid, None)
+            print(f"[hub] agent offline: {appid}", flush=True)
+            ONLINE[appid] = 0
 
 
 async def run_session(port):
@@ -603,38 +651,36 @@ async def run_session(port):
         br = Br(ws)
         await br.start()
         ctrl_task = asyncio.create_task(ctrl_loop(br))
-        stale_cycles = 0
-        BRIDGE["state"] = "up"
+        last_poll = 0.0
         try:
             while True:
                 await setup_targets(br)
+                BRIDGE["state"] = "up"
                 if not MP:
-                    stale_cycles += 1
-                    if stale_cycles >= 6:
-                        # zombie connection: bridge port alive but serves
-                        # nothing — force reconnect
-                        print("[sess] stale bridge, reconnecting",
-                              flush=True)
-                        return
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(1.5)
                     continue
-                stale_cycles = 0
-                for _ in range(2):   # ~16s rounds, 8s polls (gentler)
-                    await asyncio.sleep(8.0)
-                    await legacy_file_requests(br)
-                    activity = False
-                    for appid in list(MP):
-                        ok = await poll_agent(br, appid)
-                        if not ok:
-                            print(f"[sess] drop {appid}", flush=True)
-                            del MP[appid]
-                        else:
-                            activity = True
-                    if not MP:
-                        break
+                # Discovery uses this persistent connection. Keep fallback
+                # Runtime.evaluate polling at eight seconds independently.
+                await asyncio.sleep(2.0)
+                await legacy_file_requests(br)
+                if time.monotonic() - last_poll < 8:
+                    continue
+                last_poll = time.monotonic()
+                for appid in list(MP):
+                    if ONLINE.get(appid, 0) > time.time() - 30:
+                        continue
+                    ok = await poll_agent(br, appid)
+                    if not ok:
+                        print(f"[sess] drop {appid}", flush=True)
+                        del MP[appid]
         finally:
             ctrl_task.cancel()
             BRIDGE["state"] = "dead"
+            # Session ids belong to this bridge WebSocket. Never carry stale
+            # ids into the next connection, or reinjection is suppressed.
+            MP.clear()
+            TARGETS_CACHE.clear()
+            FAILED_CTX.clear()
 
 
 async def main():

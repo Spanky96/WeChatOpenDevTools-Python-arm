@@ -21,7 +21,7 @@ import json
 
 import frida
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "scripts", "sniper.js")
 SWAP_FILE = "/tmp/wechat_rea/swap_appid"
 

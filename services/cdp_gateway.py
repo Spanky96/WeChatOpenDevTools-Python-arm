@@ -11,7 +11,7 @@ Network panel renders wx.request with full request/response bodies.
      (Sources/Console from the bridge + Network from the agent feed)
 """
 import asyncio
-import base64
+from collections import OrderedDict
 import json
 import os
 import re
@@ -58,10 +58,10 @@ def find_bridge_port():
 
 
 async def bridge_cmd(ws, method, params=None):
-    await ws.send(json.dumps({"id": 10_000 + bridge_cmd.n, "method": method,
-                              **({"params": params} if params else {})}))
+    want = 10_000 + bridge_cmd.n
     bridge_cmd.n += 1
-    want = 10_000 + bridge_cmd.n - 1
+    await ws.send(json.dumps({"id": want, "method": method,
+                              **({"params": params} if params else {})}))
     while True:
         d = json.loads(await ws.recv())
         if d.get("id") == want:
@@ -74,9 +74,21 @@ bridge_cmd.n = 0
 async def refresh_targets(bridge_port):
     global TARGET_CACHE
     try:
+        import urllib.request
+        def status_targets():
+            with urllib.request.urlopen("http://127.0.0.1:8778/status",
+                                        timeout=1) as r:
+                status = json.loads(r.read())
+            return status.get("targetInfos", status.get("targets", []))
+        targets = await asyncio.to_thread(status_targets)
+        TARGET_CACHE = [{"type": "page", **t} for t in targets]
+        return
+    except Exception:
+        pass
+    try:
         async with websockets.connect(f"ws://127.0.0.1:{bridge_port}",
                                       open_timeout=2, max_size=2**22) as ws:
-            res = await bridge_cmd(ws, "Target.getTargets")
+            res = await asyncio.wait_for(bridge_cmd(ws, "Target.getTargets"), 3)
             TARGET_CACHE = res.get("targetInfos", [])
     except Exception:
         pass
@@ -98,7 +110,8 @@ def discovery_payload():
             "type": "page",
             "url": url,
             "webSocketDebuggerUrl":
-                f"ws://127.0.0.1:{GW_PORT}/devtools/page/{t['targetId']}",
+                f"ws://127.0.0.1:{GW_PORT}/devtools/page/{t['targetId']}" +
+                (f"?appid={m.group(1)}" if m else ""),
         })
     return out
 
@@ -108,6 +121,21 @@ def appid_of_target(target_id):
         if t.get("targetId") == target_id:
             m = re.search(r"(wx[0-9a-f]{16})", t.get("url", ""))
             return m.group(1) if m else None
+    return None
+
+
+def appid_from_session_status(target_id):
+    """Resolve target ids without opening another bridge WebSocket."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:8778/status",
+                                    timeout=1.5) as r:
+            st = json.loads(r.read())
+        for t in st.get("targets", []):
+            if t.get("targetId") == target_id:
+                return t.get("appid")
+    except Exception:
+        pass
     return None
 
 
@@ -135,14 +163,40 @@ class NetInjector:
     def __init__(self, front_ws, appid):
         self.ws = front_ws
         self.appid = appid
-        self.bodies = {}          # requestId -> {req, resp, mime}
-        self.offset = self._eof()
+        self.bodies = OrderedDict()
+        self.offsets = {"Runtime": self._start_offset(),
+                        "Network": self._start_offset()}
+        self.initial_offsets = dict(self.offsets)
+        self.inodes = {}
+        self.enabled = {"Runtime": False, "Network": False}
+        self.seen = OrderedDict()
         self.active = True
+        self.context_id = 2_147_483_647
+        self.context_sent = False
+        self.ready = True
+
+    async def enable(self, domain):
+        if domain == "Runtime" and not self.enabled[domain]:
+            self.context_sent = False
+        self.enabled[domain] = True
+
+    async def ensure_context(self):
+        if self.enabled["Runtime"] and not self.context_sent:
+            # Captured service logs need a registered context in the frontend,
+            # even when the bridge has not delivered native contexts yet.
+            await self.send_event("Runtime.executionContextCreated", {
+                "context": {"id": self.context_id,
+                            "origin": "https://servicewechat.com/",
+                            "name": "WeChat captured logs",
+                            "uniqueId": "rea-" + self.appid,
+                            "auxData": {"isDefault": False}}})
+            self.context_sent = True
 
     @staticmethod
-    def _eof():
+    def _start_offset():
         try:
-            return os.path.getsize(AGENT_EVENTS)
+            size = os.path.getsize(AGENT_EVENTS)
+            return max(0, size - 2 * 1024 * 1024)
         except OSError:
             return 0
 
@@ -153,35 +207,63 @@ class NetInjector:
         except Exception:
             self.active = False
 
-    async def _new_events(self):
+    async def _new_events(self, domain):
         """Read agent events appended since our last read."""
         out = []
         try:
-            size = os.path.getsize(AGENT_EVENTS)
-            if self.offset > size:      # rotated/truncated — start over
-                self.offset = 0
-            with open(AGENT_EVENTS, encoding="utf-8", errors="replace") as f:
-                f.seek(self.offset)
-                chunk = f.read()
-                self.offset = f.tell()
+            stat = os.stat(AGENT_EVENTS)
+            offset = self.offsets[domain]
+            if (offset > stat.st_size or
+                    self.inodes.get(domain, stat.st_ino) != stat.st_ino):
+                offset = 0
+            self.inodes[domain] = stat.st_ino
+            start = max(0, stat.st_size - 2 * 1024 * 1024)
+            with open(AGENT_EVENTS, "rb") as f:
+                if offset <= start and start:
+                    f.seek(start)
+                    f.readline()  # discard a possibly partial UTF-8/JSON line
+                else:
+                    f.seek(offset)
+                while True:
+                    pos = f.tell()
+                    line = f.readline()
+                    if not line or not line.endswith(b"\n"):
+                        self.offsets[domain] = pos
+                        break
+                    try:
+                        e = json.loads(line)
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    kind = e.get("type")
+                    if ((domain == "Runtime" and kind in ("console", "error")) or
+                            (domain == "Network" and kind in
+                             ("request", "response", "fail"))):
+                        out.append(e)
         except OSError:
             return out
-        for line in chunk.splitlines():
-            try:
-                out.append(json.loads(line))
-            except ValueError:
-                continue
         return out
 
     async def feed(self):
-        if not self.active:
+        if not self.active or not self.ready:
             return
-        for e in await self._new_events():
+        await self.ensure_context()
+        records = []
+        for domain, enabled in self.enabled.items():
+            if enabled:
+                records.extend(await self._new_events(domain))
+        for e in records:
             if e.get("appid") != self.appid:
                 continue
             t = e.get("t", time.time())
             d = e.get("data") or {}
-            rid = str(d.get("id") or f"{t}-{e.get('type')}")
+            rid = "rea:" + str(d.get("id") or f"{t}-{e.get('type')}")
+            if e.get("type") in ("request", "response", "fail"):
+                key = (rid, e["type"])
+                if key in self.seen:
+                    continue
+                self.seen[key] = True
+                if len(self.seen) > 6000:
+                    self.seen.popitem(last=False)
             if e.get("type") in ("console", "error"):
                 # synthesize V8 console events (WeChat's service console
                 # is custom — no native consoleAPICalled reaches DevTools)
@@ -198,12 +280,17 @@ class NetInjector:
                 await self.send_event("Runtime.consoleAPICalled", {
                     "type": cdptype,
                     "args": payload,
-                    "timestamp": t,
+                    "executionContextId": self.context_id,
+                    "timestamp": t * 1000,
                 })
             elif e.get("type") == "request":
                 body = d.get("data")
+                if body is not None and not isinstance(body, str):
+                    body = json.dumps(body, ensure_ascii=False)
                 self.bodies[rid] = {"req": body, "resp": None,
                                     "mime": guess_mime(body)}
+                if len(self.bodies) > 2000:
+                    self.bodies.popitem(last=False)
                 await self.send_event("Network.requestWillBeSent", {
                     "requestId": rid,
                     "loaderId": "rea",
@@ -212,30 +299,41 @@ class NetInjector:
                         "url": d.get("url", ""),
                         "method": d.get("method", "GET"),
                         "headers": parse_headers(d.get("header")),
-                        "postData": body if body else None,
+                        **({"postData": body, "hasPostData": True}
+                           if body else {}),
                         "initialPriority": "High",
                     },
                     "timestamp": t,
                     "wallTime": t,
+                    "redirectHasExtraInfo": False,
                     "type": "XHR",
                     "initiator": {"type": "script",
                                   "stack": {"callFrames": [{
                                       "functionName": "wx.request",
-                                      "url": "app-service.js"}]}},
+                                      "scriptId": "",
+                                      "url": "app-service.js",
+                                      "lineNumber": 0,
+                                      "columnNumber": 0}]}},
                 })
             elif e.get("type") == "response":
-                b = self.bodies.setdefault(rid, {"req": None, "resp": None,
-                                                 "mime": "text/plain"})
-                b["resp"] = d.get("data")
-                b["mime"] = guess_mime(d.get("data"))
+                b = self.bodies.get(rid)
+                if b is None:
+                    continue  # request fell outside the replay window
+                body = d.get("data")
+                if body is not None and not isinstance(body, str):
+                    body = json.dumps(body, ensure_ascii=False)
+                b["resp"] = body
+                b["mime"] = guess_mime(body)
+                length = len((body or "").encode("utf-8"))
                 await self.send_event("Network.responseReceived", {
                     "requestId": rid,
                     "loaderId": "rea",
                     "timestamp": t,
                     "type": "XHR",
+                    "hasExtraInfo": False,
                     "response": {
                         "url": d.get("url", ""),
-                        "status": d.get("status", 200),
+                        "status": d.get("status") or 200,
                         "statusText": "",
                         "headers": parse_headers(d.get("header")),
                         "mimeType": b["mime"],
@@ -243,14 +341,14 @@ class NetInjector:
                         "connectionId": 0,
                         "fromDiskCache": False,
                         "fromServiceWorker": False,
-                        "encodedDataLength":
-                            len(str(d.get("data") or "")),
+                        "encodedDataLength": length,
+                        "securityState": "unknown",
                     },
                 })
                 await self.send_event("Network.loadingFinished", {
                     "requestId": rid,
                     "timestamp": t,
-                    "encodedDataLength": len(str(d.get("data") or "")),
+                    "encodedDataLength": length,
                 })
             elif e.get("type") == "fail":
                 await self.send_event("Network.loadingFailed", {
@@ -272,41 +370,41 @@ class NetInjector:
         while self.active:
             try:
                 await self.feed()
-            except Exception:
-                pass
-            await asyncio.sleep(1.0)
+            except Exception as exc:
+                _log(f"event feed failed: {type(exc).__name__}: {exc}")
+            await asyncio.sleep(0.2)
 
 
 # commands the gateway answers itself (never forwarded to the bridge)
 LOCAL_METHODS = {"Network.getResponseBody", "Network.getRequestPostData"}
 
 
-async def proxy_session(front_ws, target_id, bridge_port):
+async def proxy_session(front_ws, target_id, bridge_port, appid=None):
     back = await websockets.connect(f"ws://127.0.0.1:{bridge_port}",
                                     open_timeout=3, max_size=2**22)
     injector = None
     feeder = None
+    tasks = []
+    local_replies = set()
+    page_requests = set()
+    frontend_ready = asyncio.Event()
     try:
-        res = await bridge_cmd(back, "Target.attachToTarget",
-                               {"targetId": target_id, "flatten": True})
+        res = await asyncio.wait_for(
+            bridge_cmd(back, "Target.attachToTarget",
+                       {"targetId": target_id, "flatten": True}), timeout=6)
         session = res.get("sessionId")
         if not session:
             await front_ws.close()
             return
-        await front_ws.send(json.dumps(
-            {"method": "Target.attachedToTarget",
-             "params": {"sessionId": session, "targetInfo":
-                        {"targetId": target_id, "type": "page",
-                         "title": "", "url": "", "attached": True},
-                        "waitingForDebugger": False}}))
-
         async def front_to_back():
-            nonlocal injector, feeder
+            nonlocal injector, feeder, appid
             async for msg in front_ws:
                 d = json.loads(msg)
                 method = d.get("method", "")
                 # synthetic network: intercept body requests
-                if method == "Network.getResponseBody" and injector:
+                rid = str((d.get("params") or {}).get("requestId", ""))
+                if (method == "Network.getResponseBody" and injector
+                        and rid.startswith("rea:")):
                     r = await injector.get_response_body(
                         (d.get("params") or {}).get("requestId"))
                     await front_ws.send(json.dumps({
@@ -314,7 +412,8 @@ async def proxy_session(front_ws, target_id, bridge_port):
                         "result": r or
                         {"body": "", "base64Encoded": False}}))
                     continue
-                if method == "Network.getRequestPostData" and injector:
+                if (method == "Network.getRequestPostData" and injector
+                        and rid.startswith("rea:")):
                     rid = str((d.get("params") or {}).get("requestId"))
                     body = (injector.bodies.get(rid) or {}).get("req")
                     await front_ws.send(json.dumps({
@@ -325,32 +424,88 @@ async def proxy_session(front_ws, target_id, bridge_port):
                     # feed console on Runtime.enable (DevTools startup),
                     # network needs Network.enable too — starting on either
                     # covers both panels
-                    appid = appid_of_target(target_id)
+                    appid = appid or appid_of_target(target_id)
+                    if not appid:
+                        appid = await asyncio.to_thread(
+                            appid_from_session_status, target_id)
                     if not appid:
                         await refresh_targets(bridge_port)
                         appid = appid_of_target(target_id)
+                    if not appid:
+                        _log(f"network injection pending: target {target_id}")
                     if appid and not injector:
                         injector = NetInjector(front_ws, appid)
-                        feeder = asyncio.create_task(injector.loop())
+                        injector.ready = False
+                        async def feed_after_init():
+                            try:
+                                await asyncio.wait_for(frontend_ready.wait(), 2)
+                            except asyncio.TimeoutError:
+                                pass  # non-Page CDP clients need no frame tree
+                            injector.ready = True
+                            await injector.loop()
+                        feeder = asyncio.create_task(feed_after_init())
                         _log(f"network injection ON for {appid}")
+                if method in ("Network.enable", "Network.disable",
+                              "Runtime.enable", "Runtime.disable"):
+                    # Captured events remain usable while a native enable is
+                    # slow/unsupported. Still forward it for native contexts
+                    # and H5 traffic, suppressing its duplicate response.
+                    await front_ws.send(json.dumps({
+                        "id": d.get("id"), "result": {}}))
+                    local_replies.add(d.get("id"))
+                    if injector:
+                        domain, action = method.split(".")
+                        if action == "enable":
+                            await injector.enable(domain)
+                        else:
+                            injector.enabled[domain] = False
+                params = d.get("params") or {}
+                if injector and params.get("contextId") == injector.context_id:
+                    params.pop("contextId")
                 d["sessionId"] = session
+                if method == "Page.getResourceTree":
+                    page_requests.add(d.get("id"))
                 await back.send(json.dumps(d))
 
         async def back_to_front():
             async for msg in back:
                 d = json.loads(msg)
+                if d.get("id") in local_replies:
+                    local_replies.discard(d["id"])
+                    continue
                 if d.get("sessionId") in (session, None):
                     d.pop("sessionId", None)
                     await front_ws.send(json.dumps(d))
+                    if d.get("id") in page_requests:
+                        page_requests.discard(d["id"])
+                        if (injector and injector.ready and
+                                not frontend_ready.is_set() and
+                                "frameTree" in (d.get("result") or {})):
+                            # A slow initial frame tree can arrive after the
+                            # fallback replay and clear the frontend Console.
+                            injector.offsets["Runtime"] = injector.initial_offsets["Runtime"]
+                            injector.context_sent = False
+                        frontend_ready.set()
 
-        await asyncio.gather(front_to_back(), back_to_front())
+        tasks = [asyncio.create_task(front_to_back()),
+                 asyncio.create_task(back_to_front())]
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
     finally:
+        if injector:
+            injector.active = False
         if feeder:
             feeder.cancel()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, *([feeder] if feeder else []),
+                             return_exceptions=True)
         await back.close()
 
 
 async def handler(ws):
+    from urllib.parse import parse_qs, urlsplit
     m = re.match(r"/devtools/page/([0-9A-F]+)", ws.path)
     if not m:
         await ws.close()
@@ -359,7 +514,10 @@ async def handler(ws):
     if not port:
         await ws.close()
         return
-    await proxy_session(ws, m.group(1), port)
+    appid = parse_qs(urlsplit(ws.path).query).get("appid", [None])[0]
+    if appid and not re.fullmatch(r"wx[0-9a-f]{16}", appid):
+        appid = None
+    await proxy_session(ws, m.group(1), port, appid)
 
 
 async def process_request(path, headers):

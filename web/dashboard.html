@@ -199,7 +199,9 @@ let state = {
   srcLines: null, srcFormatted: null, formatted: false,
   srcFile: null, bps: new Set(), paused: {},
   firstSeen: {},
-  lastT: Date.now()/1000 - 2,   // only events from this dashboard session
+  // Include a short recent tail so opening/refreshing the dashboard does not
+  // erase events captured while the mini-program was being discovered.
+  lastT: Date.now()/1000 - 300,
 };
 function dot(id,on){document.getElementById(id).className='dot '+(on?'on':'off');}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -234,11 +236,11 @@ function renderApps(targets){
     if(ver==='0') badges.push('<span class="badge debug">真机调试</span>');
     badges.push(`<span class="badge">v${esc(ver||'?')}</span>`);
     card.innerHTML=`<span class="appid">${a}</span><span style="display:flex;gap:5px">${badges.join('')}</span>
-      <button onclick="event.stopPropagation();openDevtools('${t.targetId}')">DevTools</button>`;
+      <button onclick="event.stopPropagation();openDevtools('${t.targetId}','${a}')">DevTools</button>`;
     box.appendChild(card);
   }
 }
-function openDevtools(tid){fetch('/api/open_devtools?target_id='+tid);}
+function openDevtools(tid,appid){fetch('/api/open_devtools?target_id='+tid+'&appid='+appid);}
 
 /* ---------- tabs ---------- */
 document.querySelectorAll('.tab').forEach(el=>{

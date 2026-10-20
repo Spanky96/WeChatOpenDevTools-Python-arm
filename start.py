@@ -225,7 +225,9 @@ async def get_targets_cached():
         data = {"bridge": st.get("bridge_port") or find_bridge_port(),
                 "bridge_state": st.get("bridge_state", "?"),
                 "targets": [t for t in st.get("targets", [])
-                            if t.get("appid")]}
+                            if t.get("appid")],
+                "mps": st.get("mps", {}),
+                "capture_settings": st.get("capture_settings", {})}
     except Exception:
         data = None
     if data is None:
@@ -283,6 +285,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        routes = {"/api/settings": "/capture_settings", "/api/retry": "/retry",
+                  "/api/evaluate": "/eval", "/api/control": "/control",
+                  "/api/breakpoint": "/breakpoint"}
+        route = routes.get(self.path.split("?")[0])
+        if not route:
+            self.send_error(404)
+            return
+        try:
+            size = int(self.headers.get("Content-Length", 0))
+            if not 0 < size <= 8192:
+                raise ValueError("invalid request size")
+            data = json.loads(self.rfile.read(size))
+            self._json(session_request(route, data))
+        except (ValueError, TypeError) as exc:
+            self._json({"error": str(exc)})
+
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/status":
@@ -307,8 +326,19 @@ class Handler(BaseHTTPRequestHandler):
             import urllib.parse
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
                                        if "?" in self.path else "")
-            since = float((qs.get("since") or ["0"])[0])
-            self._json(recent_events(since=since))
+            from services.event_store import read_events
+            try:
+                since = float((qs.get("since") or ["0"])[0])
+                if qs.get("paged") == ["1"]:
+                    self._json(read_events(cursor=(qs.get("cursor") or [None])[0],
+                                           since=since, limit=int((qs.get("limit") or ["200"])[0])))
+                else:
+                    self._json(recent_events(since=since))
+            except ValueError as exc:
+                self._json({"error": str(exc)})
+        elif path == "/api/settings":
+            from services.capture_config import load_config
+            self._json({"settings": load_config()})
         elif path == "/api/eval":
             code = self.path.split("code=", 1)[1] if "code=" in self.path else ""
             import urllib.parse
@@ -324,25 +354,7 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
                                        if "?" in self.path else "")
             appid = (qs.get("appid") or [""])[0]
-            resp_file = "/tmp/wechat_rea/service_storage_resp"
-            try:
-                os.remove(resp_file)
-            except OSError:
-                pass
-            with open("/tmp/wechat_rea/service_storage_req", "w") as f:
-                f.write(appid)
-            deadline = time.time() + 8
-            result = None
-            while time.time() < deadline:
-                time.sleep(0.4)
-                try:
-                    with open(resp_file, encoding="utf-8") as f:
-                        result = json.loads(f.read())
-                    break
-                except (OSError, ValueError):
-                    continue
-            self._json(result or {"error": "timeout — service context "
-                               "unavailable (check agent injection)"})
+            self._json(session_request("/storage", {"appid": appid}))
         elif path == "/api/files":
             import urllib.parse
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
@@ -413,11 +425,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/start_gateway":
             ok = spawn("gateway", "services/cdp_gateway.py")
             self._json({"ok": True, "started": ok})
-        elif path == "/":
-            with open(os.path.join(WEB_DIR, "dashboard.html"), "rb") as f:
+        elif path in ("/", "/dashboard.css", "/dashboard.js", "/debug_model.js",
+                       "/vendor/lucide.min.js", "/vendor/beautify.min.js"):
+            filename = "dashboard.html" if path == "/" else path.lstrip("/")
+            with open(os.path.join(WEB_DIR, filename), "rb") as f:
                 body = f.read()
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            content_type = ("text/css" if filename.endswith(".css") else
+                            "text/javascript" if filename.endswith(".js") else "text/html")
+            self.send_header("Content-Type", content_type + "; charset=utf-8")
             self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -427,23 +443,26 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def recent_events(limit=200, since=0.0):
-    """Recent service-layer events newer than `since` (unix seconds)."""
+def session_request(path, data):
+    import urllib.request
     try:
-        with open("/tmp/wechat_rea/service_events.jsonl",
-                  encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()[-limit * 3:]
-        out = []
-        for ln in lines:
-            try:
-                rec = json.loads(ln)
-            except ValueError:
-                continue
-            if rec.get("t", 0) > since:
-                out.append(rec)
-        return out[-limit:]
-    except FileNotFoundError:
-        return []
+        req = urllib.request.Request("http://127.0.0.1:8778" + path,
+                                     data=json.dumps(data).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=22) as response:
+            return json.loads(response.read())
+    except Exception as exc:
+        return {"error": f"service 请求失败: {type(exc).__name__}"}
+
+
+def recent_events(limit=200, since=0.0):
+    from services.event_store import read_events
+    page = read_events(since=since, limit=1000)
+    events = page["events"]
+    while page["has_more"]:
+        page = read_events(cursor=page["cursor"], since=since, limit=1000)
+        events = (events + page["events"])[-limit:]
+    return events[-limit:]
 
 
 def ensure_unpacked(appid):

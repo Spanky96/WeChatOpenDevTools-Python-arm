@@ -245,7 +245,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ctx, 88)
             if expression == "typeof wx":
                 return "object"
-            return 7 if expression.endswith("globalThis.__REA__.version") else "undefined"
+            return 9 if expression.endswith("globalThis.__REA__.version") else "undefined"
         with patch.object(service, "eval_js", side_effect=evaluate), patch.object(service, "emit"):
             await service.setup_targets(br)
         self.assertEqual(service.MP[APPID]["ctx"], 88)
@@ -265,6 +265,22 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectionError):
             await asyncio.wait_for(br.cmd("Target.getTargets"), 0.5)
         self.assertEqual(br.wait, {})
+
+    async def test_manual_retry_reconnects_an_injected_agent(self):
+        target = {"type": "page", "targetId": TARGET,
+                  "url": f"https://servicewechat.com/{APPID}/1/page-frame.html"}
+        service.MP[APPID] = {"sid": "session", "ctx": 88, "targetId": TARGET}
+        bridge = AsyncMock()
+        bridge.cmd.return_value = {"targetInfos": [target]}
+        with patch.object(service, "TARGETS_CACHE", [target]), \
+                patch.object(service, "WAKE", asyncio.Event()), \
+                patch.object(service, "eval_js", new_callable=AsyncMock, return_value=True) as evaluate:
+            self.assertTrue((await service.local_control({"path": "/retry", "appid": APPID}))["ok"])
+            self.assertTrue(service.WAKE.is_set())
+            await service.setup_targets(bridge)
+        self.assertIn("__REA__.reconnect()", evaluate.call_args.args[3])
+        self.assertNotIn("reconnect_requested", service.MP[APPID])
+        self.assertEqual(bridge.cmd.await_count, 1, "retry must preserve the attached debugger session")
 
     async def test_hub_and_fallback_do_not_persist_duplicate_agent_events(self):
         event = {"t": 12345, "type": "request", "data": {"id": "same"}}

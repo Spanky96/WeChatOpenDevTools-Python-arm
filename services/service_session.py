@@ -11,8 +11,7 @@ sources (exact line numbers). Serves an HTTP control API on :8778:
   POST /control    {appid,action}    resume|stepOver|stepInto|stepOut
   POST /eval       {appid,code}      evaluate (call frame when paused)
 
-Events are appended to /tmp/wechat_rea/service_events.jsonl, which is
-rotated at startup (each debug session starts clean).
+Events are appended to bounded, rotating JSONL files and survive restarts.
 """
 import asyncio
 from collections import OrderedDict
@@ -28,6 +27,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import websockets
+try:
+    from .event_store import append_event
+    from .capture_config import load_config, save_config
+except ImportError:
+    from event_store import append_event
+    from capture_config import load_config, save_config
 
 LOGDIR = ("/Users/yangyiming/Library/Application Support/微信开发者工具/"
           "d1e8765721a6c23d43b14c95b1843e6b/WeappLog/logs")
@@ -44,7 +49,10 @@ ONLINE = {}        # appid -> last heartbeat/event ts (agent hub, no bridge)
 HUB_VERSION = {}   # appid -> newest injected agent generation
 HUB_SOCKET = {}    # appid -> current agent WebSocket
 BRIDGE = {"state": "connecting", "port": None}   # connecting|up|dead
-FAILED_CTX = {}    # targetId -> ts of last context-discovery failure
+FAILED_CTX = {}    # targetId -> retry state (attempts, deadline, attached sid)
+DIAGNOSTICS = {}
+LAST_EVENT = {}
+WAKE = None
 SEEN_EVENTS = OrderedDict()
 ws_ref = {}
 _loop = None
@@ -52,8 +60,7 @@ _ctrl_queue = None  # asyncio.Queue of (req, done_event, result_box)
 
 
 def emit(rec):
-    with open(EVENTS, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    append_event(rec, path=EVENTS)
 
 
 def emit_agent(appid, event):
@@ -68,6 +75,7 @@ def emit_agent(appid, event):
     SEEN_EVENTS[key] = True
     if len(SEEN_EVENTS) > 4096:
         SEEN_EVENTS.popitem(last=False)
+    LAST_EVENT[appid] = time.time()
     emit({**event, "agent_t": event.get("t"),
           "t": time.time(), "appid": appid})
 
@@ -117,6 +125,7 @@ class Br:
         self.wait = {}
         self.buf = []
         self.reader = None
+        self.contexts = {}
 
     async def start(self):
         self.reader = asyncio.create_task(self._rd())
@@ -132,7 +141,10 @@ class Br:
                 elif m.get("method", "").startswith("Debugger."):
                     await self._on_event(m)
                 else:
+                    self._runtime_event(m)
                     self.buf.append(m)
+                    if len(self.buf) > 2000:
+                        del self.buf[:len(self.buf) - 2000]
         except Exception:
             pass
         finally:
@@ -140,6 +152,44 @@ class Br:
                 if not fut.done():
                     fut.set_exception(ConnectionError("bridge disconnected"))
             self.wait.clear()
+
+    def _runtime_event(self, message):
+        method, sid = message.get("method"), message.get("sessionId")
+        params = message.get("params") or {}
+        if method == "Runtime.executionContextCreated":
+            context = params.get("context") or {}
+            if context.get("id") is not None:
+                self.contexts.setdefault(sid, {})[context["id"]] = context
+                for retry in FAILED_CTX.values():
+                    if retry.get("sid") == sid:
+                        retry["next_retry"] = 0
+                if WAKE:
+                    WAKE.set()
+        elif method in ("Runtime.executionContextDestroyed", "Runtime.executionContextsCleared"):
+            destroyed = params.get("executionContextId")
+            if method.endswith("Cleared"):
+                self.contexts.pop(sid, None)
+            else:
+                self.contexts.get(sid, {}).pop(destroyed, None)
+            for appid, value in list(MP.items()):
+                if value["sid"] == sid and (destroyed is None or value["ctx"] == destroyed):
+                    MP.pop(appid, None)
+                    FAILED_CTX[value["targetId"]] = {"sid": sid, "attempts": 0, "next_retry": 0}
+                    DIAGNOSTICS[appid] = {"phase": "waiting_context", "since": time.time()}
+            if WAKE:
+                WAKE.set()
+        elif method == "Target.detachedFromTarget":
+            detached = params.get("sessionId")
+            self.contexts.pop(detached, None)
+            for retry in FAILED_CTX.values():
+                if retry.get("sid") == detached:
+                    retry["sid"] = None
+                    retry["next_retry"] = 0
+            for appid, value in list(MP.items()):
+                if value["sid"] == detached:
+                    MP.pop(appid, None)
+            if WAKE:
+                WAKE.set()
 
     async def _on_event(self, m):
         sid = m.get("sessionId")
@@ -182,8 +232,8 @@ class Br:
         m = {"id": mid, "method": method, "params": params}
         if sid:
             m["sessionId"] = sid
-        await self.ws.send(json.dumps(m))
         try:
+            await self.ws.send(json.dumps(m))
             r = await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
             return {"_err": "timeout"}
@@ -218,6 +268,33 @@ DUMP_STORAGE_JS = (
     "return JSON.stringify({err:String(e)})}})()")
 
 
+def retry_later(appid, target_id, sid, reason):
+    attempts = FAILED_CTX.get(target_id, {}).get("attempts", 0) + 1
+    delay = min(2 ** min(attempts, 5), 30)
+    FAILED_CTX[target_id] = {"attempts": attempts, "next_retry": time.time() + delay,
+                             "sid": sid, "reason": reason}
+    DIAGNOSTICS[appid] = {"phase": "retrying", "since": time.time(), "reason": reason}
+
+
+def app_status(appid, target_id=None):
+    now = time.time()
+    value = MP.get(appid, {})
+    diag = DIAGNOSTICS.get(appid, {})
+    retry = FAILED_CTX.get(target_id, {})
+    online = ONLINE.get(appid, 0) > now - 30
+    phase = "online" if online else diag.get("phase", "discovered")
+    if value and not online:
+        phase = "connecting" if now - diag.get("since", now) < 15 else "offline"
+    return {**diag, "phase": phase, "agent_online": online,
+            "agent_version": HUB_VERSION.get(appid) or value.get("agent_version"),
+            "last_event_at": LAST_EVENT.get(appid), "heartbeat_at": ONLINE.get(appid),
+            "retry_in": max(0, round(retry.get("next_retry", 0) - now, 1)),
+            "attempts": retry.get("attempts", 0),
+            "capture_legacy": value.get("capture_legacy", []),
+            "debugger": value.get("dbg", False), "scripts": list(value.get("scripts", {}))[:20],
+            "paused": value.get("paused"), "bps": list(value.get("bps", {}))}
+
+
 async def setup_targets(br):
     r = await br.cmd("Target.getTargets", timeout=6)
     if not isinstance(r, dict) or "_err" in r or "targetInfos" not in r:
@@ -234,26 +311,52 @@ async def setup_targets(br):
         seen.add(appid)
         if appid in MP:
             if MP[appid].get("targetId") == t["targetId"]:
-                continue
-            del MP[appid]
-        if time.time() - FAILED_CTX.get(t["targetId"], 0) < 60:
-            continue   # recently failed — don't churn attach on dead targets
-        a = await br.cmd("Target.attachToTarget", targetId=t["targetId"],
-                         flatten=True, timeout=6)
-        sid = a.get("sessionId") if isinstance(a, dict) else None
-        if not sid:
+                value = MP[appid]
+                if not value.pop("reconnect_requested", False):
+                    continue
+                connected = await eval_js(
+                    br, value["sid"], value["ctx"],
+                    "(function(){if(typeof __REA__==='object' && __REA__.reconnect){"
+                    "__REA__.reconnect();return true}return false})()", timeout=4)
+                if connected:
+                    DIAGNOSTICS[appid] = {"phase": "connecting", "since": time.time()}
+                    continue
+                MP.pop(appid, None)
+                FAILED_CTX[t["targetId"]] = {"sid": value["sid"], "next_retry": 0,
+                                             "attempts": 0}
+            else:
+                previous = MP.pop(appid)
+                await br.cmd("Target.detachFromTarget", sessionId=previous["sid"], timeout=2)
+        retry = FAILED_CTX.get(t["targetId"], {})
+        if time.time() < retry.get("next_retry", 0):
             continue
+        DIAGNOSTICS[appid] = {"phase": "attaching", "since": time.time()}
+        sid = retry.get("sid")
+        if not sid:
+            a = await br.cmd("Target.attachToTarget", targetId=t["targetId"],
+                             flatten=True, timeout=6)
+            sid = a.get("sessionId") if isinstance(a, dict) else None
+        if not sid:
+            retry_later(appid, t["targetId"], None, "无法附加目标")
+            continue
+        DIAGNOSTICS[appid] = {"phase": "waiting_context", "since": time.time()}
         svc = None
+        invalid_session = False
         # Context-created notifications can arrive after the enable response
         # on 4.1.13. Give the target a second short window before marking it
         # failed for the full cooldown period.
         for attempt in range(2):
-            await br.cmd("Runtime.enable", sid, timeout=5)
-            evs = await br.drain(1.0 if attempt == 0 else 0.8)
+            result = await br.cmd("Runtime.enable", sid, timeout=5)
+            if isinstance(result, dict) and ("code" in result or "_err" in result):
+                invalid_session = True
+                break
+            cached = br.contexts.get(sid, {}) if isinstance(br.contexts, dict) else {}
+            evs = [] if cached else await br.drain(1.0 if attempt == 0 else 0.8)
             ctxs = [e["params"]["context"] for e in evs
                     if e.get("method") == "Runtime.executionContextCreated"
                     and e.get("sessionId") == sid
                     and e.get("params", {}).get("context")]
+            ctxs += [context for context in cached.values() if context not in ctxs]
             for c in ctxs:
                 if await eval_js(br, sid, c.get("id"), "typeof wx",
                                  timeout=3) == "object":
@@ -263,8 +366,8 @@ async def setup_targets(br):
                 break
         if svc is None:
             print(f"[sess] {appid}: no service ctx", flush=True)
-            FAILED_CTX[t["targetId"]] = time.time()
-            await br.cmd("Target.detachFromTarget", sessionId=sid, timeout=2)
+            retry_later(appid, t["targetId"], None if invalid_session else sid,
+                        "附加会话已失效" if invalid_session else "等待 service 上下文")
             continue
         # Re-evaluate the agent (idempotent: its IIFE early-returns
         # if present). Page reloads after bridge restarts create fresh
@@ -272,13 +375,15 @@ async def setup_targets(br):
         with open(os.path.join(ROOT, "scripts", "rea_agent.js")) as f:
             agent_src = f.read()
         chk = await eval_js(br, sid, svc, "typeof __REA__", timeout=4)
+        DIAGNOSTICS[appid] = {"phase": "injecting", "since": time.time()}
+        agent_src = "globalThis.__REA_CAPTURE__=" + json.dumps(load_config()) + ";\n" + agent_src
         version = await eval_js(br, sid, svc,
                                agent_src + "\n;globalThis.__REA__.version", timeout=9)
-        if not isinstance(version, (int, float)) or version < 5:
+        if not isinstance(version, (int, float)) or version < 9:
             print(f"[sess] agent injection unconfirmed -> {appid}", flush=True)
-            FAILED_CTX[t["targetId"]] = time.time()
-            await br.cmd("Target.detachFromTarget", sessionId=sid, timeout=2)
+            retry_later(appid, t["targetId"], sid, "agent 注入尚未确认")
             continue
+        legacy = await eval_js(br, sid, svc, "globalThis.__REA__.legacyHooks || []", timeout=3)
         print(f"[sess] agent ensured ({chk}) -> {appid}", flush=True)
         # NOTE: Debugger.enable stays OFF by default — enabling it on the
         # service context stalls live event capture (observed 2026-10-19).
@@ -286,12 +391,22 @@ async def setup_targets(br):
         MP[appid] = {"sid": sid, "ctx": svc, "targetId": t["targetId"],
                      "scripts": {}, "paused": None,
                      "topFrame": None, "bps": {}, "fails": 0,
-                     "dbg": False, "agent_version": version}
+                     "dbg": False, "agent_version": version,
+                     "capture_legacy": legacy if isinstance(legacy, list) else []}
+        FAILED_CTX.pop(t["targetId"], None)
+        DIAGNOSTICS[appid] = {"phase": "connecting", "since": time.time()}
         emit({"t": time.time(), "appid": appid, "type": "attached",
               "data": {"debugger": False}})
     for a in [a for a in MP if a not in seen]:
         print(f"[sess] {a} gone", flush=True)
-        del MP[a]
+        previous = MP.pop(a)
+        await br.cmd("Target.detachFromTarget", sessionId=previous["sid"], timeout=2)
+    active_ids = {t["targetId"] for t in pages}
+    for target_id in list(FAILED_CTX):
+        if target_id not in active_ids:
+            sid = FAILED_CTX.pop(target_id).get("sid")
+            if sid:
+                await br.cmd("Target.detachFromTarget", sessionId=sid, timeout=2)
 
 
 async def refresh_ctx(br, v):
@@ -397,6 +512,10 @@ async def process_ctrl(br, req):
         return {"error": f"appid 未连接 (当前: {list(MP) or '无'}) — "
                          "等小程序出现在列表中再试"}
     try:
+        if req.get("path") == "/storage":
+            raw = await eval_js(br, v["sid"], v["ctx"], DUMP_STORAGE_JS, timeout=6)
+            data = json.loads(raw) if isinstance(raw, str) else {"err": "上下文不可用"}
+            return {"appid": appid, "data": data}
         if req.get("path") == "/breakpoint":
             line = int(req.get("line", 0))
             f = req.get("file", "app-service.js")
@@ -569,6 +688,13 @@ class CtrlHandler(BaseHTTPRequestHandler):
         except ValueError:
             req = {}
         req["path"] = self.path.split("?")[0]
+        if req["path"] in ("/capture_settings", "/retry"):
+            future = asyncio.run_coroutine_threadsafe(local_control(req), _loop)
+            try:
+                self._json(future.result(timeout=5))
+            except Exception as exc:
+                self._json({"error": str(exc)})
+            return
         ev = threading.Event()
         box = {}
         _loop.call_soon_threadsafe(_ctrl_queue.put_nowait,
@@ -589,15 +715,38 @@ class CtrlHandler(BaseHTTPRequestHandler):
                                     for t in TARGETS_CACHE
                                     if t.get("type") == "page" and
                                     "servicewechat.com/wx" in t.get("url", "")],
-                        "mps": {a: {"debugger": v.get("dbg", False),
-                                    "agent_online": ONLINE.get(a, 0) > time.time() - 30,
-                                    "agent_version": v.get("agent_version"),
-                                    "scripts": list(v["scripts"].keys())[:20],
-                                    "paused": v["paused"],
-                                    "bps": list(v.get("bps", {}).keys())}
-                                for a, v in MP.items()}})
+                        "mps": {a: app_status(a, t.get("targetId"))
+                                for t in list(TARGETS_CACHE)
+                                for a in [(re.search(r"(wx[0-9a-f]{16})", t.get("url", "")) or [None, None])[1]]
+                                if a and t.get("type") == "page"},
+                        "capture_settings": load_config()})
         else:
             self._json({})
+
+
+async def local_control(req):
+    if req["path"] == "/retry":
+        appid = req.get("appid")
+        if not re.fullmatch(r"wx[0-9a-f]{16}", appid or ""):
+            return {"error": "无效 appid"}
+        if appid in MP:
+            MP[appid]["reconnect_requested"] = True
+        for target in TARGETS_CACHE:
+            if appid in target.get("url", ""):
+                retry = FAILED_CTX.get(target.get("targetId"))
+                if retry:
+                    retry["next_retry"] = 0
+        if WAKE:
+            WAKE.set()
+        return {"ok": True}
+    try:
+        config = save_config(req.get("settings"))
+    except ValueError as exc:
+        return {"error": str(exc)}
+    sockets = list(HUB_SOCKET.values())
+    await asyncio.gather(*(ws.send(json.dumps({"config": config})) for ws in sockets),
+                         return_exceptions=True)
+    return {"ok": True, "settings": config}
 
 
 async def agent_hub(ws):
@@ -624,6 +773,7 @@ async def agent_hub(ws):
     emit({"t": time.time(), "appid": appid, "type": "agent_online",
           "data": {}})
     try:
+        await ws.send(json.dumps({"config": load_config()}))
         async for raw in ws:
             if HUB_SOCKET.get(appid) is not ws:
                 continue
@@ -645,6 +795,8 @@ async def agent_hub(ws):
 
 
 async def run_session(port):
+    global WAKE
+    WAKE = asyncio.Event()
     BRIDGE["state"], BRIDGE["port"] = "connecting", port
     async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=3,
                                   max_size=2**24) as ws:
@@ -661,7 +813,11 @@ async def run_session(port):
                     continue
                 # Discovery uses this persistent connection. Keep fallback
                 # Runtime.evaluate polling at eight seconds independently.
-                await asyncio.sleep(2.0)
+                try:
+                    await asyncio.wait_for(WAKE.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass
+                WAKE.clear()
                 await legacy_file_requests(br)
                 if time.monotonic() - last_poll < 8:
                     continue
@@ -693,12 +849,7 @@ async def main():
     except OSError:
         print("[sess] another instance holds the lock, exiting", flush=True)
         return
-    # rotate events: each session starts clean
-    try:
-        if os.path.exists(EVENTS):
-            os.rename(EVENTS, EVENTS + ".old")
-    except OSError:
-        pass
+    # Retain bounded history across daemon restarts; append_event rotates it.
     open(EVENTS, "a").close()
     print("[sess] service session daemon v3.1 started", flush=True)
 
@@ -708,7 +859,7 @@ async def main():
     server = ThreadingHTTPServer(("127.0.0.1", CTRL_PORT), CtrlHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     await websockets.serve(agent_hub, "127.0.0.1", 8779,
-                           max_size=2**22)
+                           max_size=2**24)
 
     refused = 0
     cand_idx = 0

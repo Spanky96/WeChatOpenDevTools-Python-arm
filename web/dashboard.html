@@ -1,539 +1,63 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<title>微信小程序 DevTools</title>
-<script src="https://cdn.jsdelivr.net/npm/js-beautify@1.15.1/js/lib/beautify.min.js"
-        onerror="window.__noBeautify=true"></script>
-<style>
-  :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --fg:#e6e9ef;
-          --dim:#8b93a3; --green:#3ddc84; --red:#ff5c5c; --blue:#5aa2ff;
-          --amber:#ffb454; --sel:#1d4ed3; }
-  * { box-sizing:border-box; margin:0; padding:0; }
-  html,body { height:100%; }
-  body { background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
-         font:13px/1.5 -apple-system,"SF Pro Text",sans-serif; padding:12px 14px; }
-  h1 { font-size:15px; }
-  .sub { color:var(--dim); font-size:11px; }
-  .statusbar { display:flex; gap:12px; align-items:center; padding-bottom:8px;
-               border-bottom:1px solid var(--line); margin-bottom:8px; }
-  .dot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:4px; }
-  .on { background:var(--green); } .off { background:var(--red); }
-  .tag { font-size:11px; color:var(--dim); }
-
-  .apps { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
-  .app-card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
-              padding:7px 11px; cursor:pointer; display:flex; gap:10px; align-items:center; }
-  .app-card.selected { border-color:var(--sel); background:#1a2740; }
-  .app-card .appid { font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-  .badge { font-size:10px; padding:1px 7px; border-radius:8px; background:#232937; color:var(--dim); }
-  .badge.debug { color:var(--amber); border:1px solid #6b5320; }
-  .badge.agent { color:var(--blue); }
-  .app-card button { font-size:11px; padding:2px 10px; background:#242936; color:var(--fg);
-                     border:1px solid var(--line); border-radius:6px; cursor:pointer; }
-
-  /* paused banner */
-  .paused { display:none; background:#3b2e0a; border:1px solid var(--amber); color:var(--amber);
-            border-radius:8px; padding:8px 12px; margin-bottom:8px; font-size:12px;
-            align-items:center; gap:10px; flex-wrap:wrap; }
-  .paused.show { display:flex; }
-  .paused .frames { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--fg);
-                    max-height:60px; overflow:auto; flex-basis:100%; }
-  .paused button { background:#4a3a10; color:var(--amber); border:1px solid #6b5320;
-                   border-radius:6px; padding:3px 12px; cursor:pointer; font-size:11px; }
-
-  .tabs { display:flex; gap:4px; }
-  .tab { background:var(--panel); border:1px solid var(--line); border-bottom:none;
-         border-radius:8px 8px 0 0; padding:6px 16px; cursor:pointer; color:var(--dim); font-size:12px; }
-  .tab.active { color:var(--fg); background:#1e2330; font-weight:600; }
-  .tabbody { background:var(--panel); border:1px solid var(--line); border-radius:0 8px 8px 8px;
-             padding:10px; flex:1; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
-  .page { display:none; flex:1; overflow:hidden; flex-direction:column; min-height:0; }
-  .page.active { display:flex; }
-
-  .toolbar { display:flex; gap:8px; margin-bottom:8px; align-items:center; }
-  .toolbar input { background:#12151b; color:var(--fg); border:1px solid var(--line);
-                   border-radius:6px; padding:4px 10px; font-size:12px; width:220px; }
-  .btn { background:#242936; color:var(--fg); border:1px solid var(--line);
-         border-radius:6px; padding:4px 12px; font-size:11px; cursor:pointer; }
-  .btn:hover { background:#2e3546; }
-  .count { font-size:11px; color:var(--dim); margin-left:auto; }
-
-  #console-scroll { overflow-y:auto; flex:1; font-family:ui-monospace,Menlo,monospace; }
-  .cline { font-size:11.5px; padding:3px 6px; border-bottom:1px dashed #20242e;
-           word-break:break-all; white-space:pre-wrap; }
-  .cline:hover { background:#1f232c; }
-  .lv-error { color:var(--red); } .lv-warn { color:var(--amber); } .lv-info { color:var(--blue); }
-  .cline .ts { color:#5a6272; margin-right:8px; font-size:10px; }
-  .srclink { color:var(--blue); cursor:pointer; text-decoration:underline; margin-left:6px; font-size:11px; }
-
-  .netwrap { display:flex; gap:10px; flex:1; overflow:hidden; min-height:0; }
-  .netlist { width:46%; overflow-y:auto; border-right:1px solid var(--line); }
-  .netdetail { flex:1; overflow-y:auto; padding-left:10px; }
-  table { width:100%; border-collapse:collapse; font-size:12px; }
-  th { text-align:left; color:var(--dim); font-weight:500; padding:4px 6px;
-       border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--panel); }
-  td { padding:4px 6px; border-bottom:1px solid #20242e; }
-  tr.nrow { cursor:pointer; }
-  tr.nrow:hover td, tr.nrow.selected td { background:#1f232c; }
-  .m { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
-  .method { font-weight:700; font-size:11px; }
-  .GET { color:var(--green); } .POST { color:var(--amber); }
-  .PUT,.DELETE,.PATCH { color:var(--red); }
-  .s2 { color:var(--green); font-weight:600; } .s4,.s5 { color:var(--red); font-weight:600; }
-  .kv { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
-  .kv .k { color:var(--dim); display:inline-block; min-width:110px; }
-  .sec { margin-bottom:10px; }
-  .sec h3 { font-size:11px; color:var(--dim); text-transform:uppercase; margin-bottom:5px; }
-  pre.body { background:#12151b; border:1px solid var(--line); border-radius:6px; padding:8px;
-             font-family:ui-monospace,Menlo,monospace; font-size:11px; white-space:pre-wrap;
-             word-break:break-all; max-height:240px; overflow:auto; }
-
-  .stbar { margin-bottom:8px; display:flex; gap:10px; align-items:center; }
-
-  .srcbar { display:flex; gap:8px; margin-bottom:6px; align-items:center; flex-wrap:wrap; }
-  select, .srcbar input[type=text] { background:#12151b; color:var(--fg); border:1px solid var(--line);
-        border-radius:6px; padding:4px 8px; font-size:12px; }
-  #src-scroll { overflow:auto; flex:1; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
-  .srcline { white-space:pre; line-height:1.45; }
-  .srcline .no { color:#5a6272; display:inline-block; width:44px; text-align:right;
-                margin-right:12px; cursor:pointer; user-select:none; }
-  .srcline .no:hover { color:var(--red); }
-  .srcline.hl { background:#3b2e0a; outline:1px solid var(--amber); }
-  .srcline.bp { background:#2a1520; }
-  .srcline.bp .no { color:var(--red); font-weight:700; }
-  .empty { color:var(--dim); padding:26px; text-align:center; }
-  #repl-in { flex:1; background:#12151b; color:var(--fg); border:1px solid var(--line);
-             border-radius:6px; padding:5px 10px; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>微信 DevTools</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script defer src="/vendor/lucide.min.js"></script>
+  <script defer src="/vendor/beautify.min.js"></script>
+  <script defer src="/debug_model.js"></script>
+  <script defer src="/dashboard.js"></script>
 </head>
 <body>
-
-<div class="statusbar">
-  <h1>微信小程序 DevTools</h1>
-  <span class="sub">网络 / 控制台 / Storage / 源码断点</span>
-  <span style="flex:1"></span>
-  <span class="tag"><span class="dot" id="d-sniper"></span>sniper</span>
-  <span class="tag"><span class="dot" id="d-gateway"></span>gateway</span>
-  <span class="tag"><span class="dot" id="d-sess"></span>service</span>
-  <span class="tag" id="bridge-tag">桥: -</span>
-</div>
-
-<div class="apps" id="apps"></div>
-
-<div class="paused" id="paused-bar">
-  ⏸ 已暂停 <span id="paused-reason"></span>
-  <button onclick="dbgControl('resume')">▶ 继续</button>
-  <button onclick="dbgControl('stepOver')">⤵ 步过</button>
-  <button onclick="dbgControl('stepInto')">→ 步入</button>
-  <button onclick="dbgControl('stepOut')">← 步出</button>
-  <div class="frames" id="paused-frames"></div>
-</div>
-
-<div class="tabs">
-  <div class="tab active" data-tab="console">控制台</div>
-  <div class="tab" data-tab="network">网络 <span id="net-badge"></span></div>
-  <div class="tab" data-tab="storage">Storage</div>
-  <div class="tab" data-tab="source">源码 · 断点</div>
-</div>
-<div class="tabbody">
-  <div class="page active" id="page-console">
-    <div class="toolbar">
-      <input id="con-filter" placeholder="过滤关键字…" oninput="renderConsole()">
-      <button class="btn" onclick="state.con[state.selected]=[];renderConsole()">清空</button>
-      <span class="count" id="con-count"></span>
+  <header class="app-header">
+    <div class="brand"><span class="brand-icon"><i data-lucide="terminal-square"></i></span><h1>微信 DevTools</h1><span class="local-tag">LOCAL</span></div>
+    <div class="services" aria-label="服务状态">
+      <span class="service" id="service-sniper" title="Sniper"><b class="dot"></b>Sniper</span>
+      <span class="service" id="service-gateway" title="Gateway"><b class="dot"></b>Gateway</span>
+      <span class="service" id="service-sess" title="Service"><b class="dot"></b>Service</span>
     </div>
-    <div id="console-scroll"></div>
-    <div class="toolbar" style="margin-top:6px">
-      <input id="repl-in" placeholder="在小程序 service 层执行 JS（断点暂停时 = 在当前栈帧求值）">
-      <button class="btn" onclick="sendEval()">执行</button>
-    </div>
+    <button class="icon-btn" id="settings-open" aria-label="捕获设置" data-tip="捕获设置"><i data-lucide="sliders-horizontal"></i></button>
+  </header>
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="sidebar-heading"><span>小程序会话</span><span id="app-count" class="pill">0</span><button class="icon-btn small" id="refresh-status" aria-label="刷新状态" data-tip="刷新状态"><i data-lucide="refresh-cw"></i></button></div>
+      <div class="app-list" id="apps"><div class="empty">正在读取会话</div></div>
+      <div class="bridge-status"><div><b class="dot" id="bridge-dot"></b><strong id="bridge-title">调试桥</strong><span class="mono" id="bridge-port">--</span></div><span id="bridge-state">连接中</span><span id="sync-status">等待同步</span></div>
+    </aside>
+    <main class="workspace">
+      <section class="session-header">
+        <div class="session-title"><div class="eyebrow">当前会话</div><h2 id="selected-app">未选择小程序</h2><div class="session-meta"><span id="session-phase" class="status-pill">等待发现</span><span id="agent-version">Agent --</span><span id="last-event">尚无事件</span></div></div>
+        <div class="session-actions"><button class="btn" id="retry-agent"><i data-lucide="rotate-cw"></i>重试连接</button><button class="btn primary" id="open-devtools"><i data-lucide="external-link"></i>DevTools</button></div>
+      </section>
+      <div class="notice hidden" id="session-notice" role="status"></div>
+      <div class="paused hidden" id="paused-bar"><i data-lucide="pause"></i><strong>已暂停</strong><span id="paused-reason"></span><div class="debug-actions"><button class="icon-btn" data-debug="resume" aria-label="继续" data-tip="继续"><i data-lucide="play"></i></button><button class="icon-btn" data-debug="stepOver" aria-label="步过" data-tip="步过"><i data-lucide="corner-down-right"></i></button><button class="icon-btn" data-debug="stepInto" aria-label="步入" data-tip="步入"><i data-lucide="arrow-down-to-line"></i></button><button class="icon-btn" data-debug="stepOut" aria-label="步出" data-tip="步出"><i data-lucide="arrow-up-from-line"></i></button></div></div>
+      <nav class="tabs" role="tablist" aria-label="调试视图">
+        <button class="tab active" data-tab="network" role="tab" aria-selected="true"><i data-lucide="network"></i>Network<span id="net-badge" class="tab-count">0</span></button>
+        <button class="tab" data-tab="console" role="tab" aria-selected="false"><i data-lucide="terminal"></i>Console<span id="con-badge" class="tab-count">0</span></button>
+        <button class="tab" data-tab="storage" role="tab" aria-selected="false"><i data-lucide="database"></i>Storage</button>
+        <button class="tab" data-tab="source" role="tab" aria-selected="false"><i data-lucide="file-code-2"></i>源码</button>
+        <button class="tab" data-tab="diagnostics" role="tab" aria-selected="false"><i data-lucide="activity"></i>连接诊断</button>
+      </nav>
+      <section class="page active" id="page-network" role="tabpanel" aria-label="Network">
+        <div class="toolbar"><label class="search"><i data-lucide="search"></i><input id="net-filter" placeholder="筛选 URL 或域名" aria-label="筛选 URL 或域名"></label><select id="net-method" aria-label="请求方法"><option value="">所有方法</option><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option><option>PATCH</option><option>HEAD</option><option>OPTIONS</option></select><select id="net-state" aria-label="请求状态"><option value="">所有状态</option><option value="error">失败 / 4xx / 5xx</option><option value="pending">等待响应</option><option value="truncated">内容已截断</option></select><span class="toolbar-spacer"></span><span class="count" id="net-count">0 个请求</span><button class="icon-btn" id="export-network" aria-label="导出网络记录" data-tip="导出网络记录"><i data-lucide="download"></i></button><button class="icon-btn danger" id="clear-network" aria-label="清空网络记录" data-tip="清空网络记录"><i data-lucide="trash-2"></i></button></div>
+        <div class="network-summary"><span><b id="summary-total">0</b> 请求</span><span class="error-text"><b id="summary-errors">0</b> 失败</span><span><b id="summary-size">0 B</b> 已捕获</span><span id="network-retention"></span></div>
+        <div class="network-workspace" id="network-workspace"><div class="network-table"><table><thead><tr><th class="col-status">状态</th><th>请求 / 域名</th><th class="col-method">方法</th><th class="col-size">大小</th><th class="col-time">耗时</th></tr></thead><tbody id="net-rows"></tbody></table><div class="empty" id="net-empty"><i data-lucide="network"></i><strong>暂无请求</strong><span id="net-empty-label">等待捕获事件</span></div></div><aside class="request-detail hidden" id="net-detail"></aside></div>
+      </section>
+      <section class="page" id="page-console" role="tabpanel" aria-label="Console" hidden>
+        <div class="toolbar"><label class="search"><i data-lucide="search"></i><input id="con-filter" placeholder="筛选日志" aria-label="筛选日志"></label><select id="con-level" aria-label="日志级别"><option value="">所有级别</option><option value="error">Error</option><option value="warn">Warning</option><option value="info">Info</option><option value="log">Log</option></select><label class="check"><input type="checkbox" id="con-follow" checked>自动滚动</label><span class="toolbar-spacer"></span><span class="count" id="con-count">0 条</span><button class="icon-btn" id="pause-console" aria-label="暂停显示" data-tip="暂停显示"><i data-lucide="pause"></i></button><button class="icon-btn" id="export-console" aria-label="导出日志" data-tip="导出日志"><i data-lucide="download"></i></button><button class="icon-btn danger" id="clear-console" aria-label="清空控制台" data-tip="清空控制台"><i data-lucide="trash-2"></i></button></div>
+        <div id="console-scroll" class="console-scroll"><div class="empty">暂无日志</div></div>
+        <form class="repl" id="repl-form"><i data-lucide="chevron-right"></i><input id="repl-in" autocomplete="off" spellcheck="false" placeholder="JavaScript 表达式" aria-label="JavaScript 表达式"><button class="icon-btn" type="submit" aria-label="执行表达式" data-tip="执行表达式"><i data-lucide="corner-down-left"></i></button></form>
+      </section>
+      <section class="page" id="page-storage" role="tabpanel" aria-label="Storage" hidden><div class="toolbar"><label class="search"><i data-lucide="search"></i><input id="storage-filter" placeholder="筛选 Key 或 Value" aria-label="筛选存储"></label><span id="st-info" class="count"></span><span class="toolbar-spacer"></span><button class="icon-btn" id="storage-refresh" aria-label="刷新存储" data-tip="刷新存储"><i data-lucide="refresh-cw"></i></button><button class="icon-btn" id="export-storage" aria-label="导出存储" data-tip="导出存储"><i data-lucide="download"></i></button></div><div class="table-scroll"><table class="storage-table"><thead><tr><th>Key</th><th>Value</th><th class="col-action"></th></tr></thead><tbody id="st-rows"></tbody></table><div class="empty" id="st-empty">暂无存储</div></div></section>
+      <section class="page" id="page-source" role="tabpanel" aria-label="源码" hidden><div class="toolbar"><select id="src-file" aria-label="源码文件"><option value="">选择文件</option></select><input id="src-goto" type="number" min="1" placeholder="行号" aria-label="跳转行号"><div class="segmented"><button class="active" id="src-raw">原始</button><button id="src-format">格式化</button></div><span class="toolbar-spacer"></span><button class="icon-btn" id="source-copy" aria-label="复制源码" data-tip="复制源码"><i data-lucide="copy"></i></button><button class="icon-btn" id="source-download" aria-label="下载源码" data-tip="下载源码"><i data-lucide="download"></i></button></div><div class="source-info" id="src-info"></div><div class="source-scroll" id="src-scroll"><div class="empty">暂无源码</div></div></section>
+      <section class="page" id="page-diagnostics" role="tabpanel" aria-label="连接诊断" hidden><div class="diagnostics"><h3>当前会话</h3><dl id="diagnostic-values"></dl><h3>捕获设置</h3><dl id="capture-values"></dl><h3>事件存储</h3><dl><dt>轮换大小</dt><dd>16 MiB / 文件，保留 3 份历史</dd><dt>读取方式</dt><dd>增量游标 / 分页续读</dd><dt>同步状态</dt><dd id="diagnostic-sync">等待同步</dd></dl></div></section>
+      <footer class="workspace-footer"><span><b class="dot" id="connection-dot"></b><span id="connection-label">连接中</span></span><span id="footer-activity">--</span></footer>
+    </main>
   </div>
-  <div class="page" id="page-network">
-    <div class="toolbar">
-      <input id="net-filter" placeholder="过滤 URL…" oninput="renderNet()">
-      <button class="btn" onclick="state.net[state.selected]=[];renderNet()">清空</button>
-      <span class="count" id="net-count"></span>
-    </div>
-    <div class="netwrap">
-      <div class="netlist">
-        <table>
-          <thead><tr><th style="width:66px">时间</th><th style="width:42px">方法</th><th>URL</th><th style="width:38px">状态</th></tr></thead>
-          <tbody id="net-rows"></tbody>
-        </table>
-        <div class="empty" id="net-empty">暂无请求</div>
-      </div>
-      <div class="netdetail" id="net-detail"><div class="empty">点击左侧请求查看详情</div></div>
-    </div>
-  </div>
-  <div class="page" id="page-storage">
-    <div class="stbar">
-      <button class="btn" onclick="loadStorage()">刷新 Storage</button>
-      <span class="sub" id="st-info"></span>
-    </div>
-    <div style="overflow:auto; flex:1">
-      <table>
-        <thead><tr><th style="width:30%">Key</th><th>Value</th></tr></thead>
-        <tbody id="st-rows"></tbody>
-      </table>
-      <div class="empty" id="st-empty">点击刷新读取小程序本地存储</div>
-    </div>
-  </div>
-  <div class="page" id="page-source">
-    <div class="srcbar">
-      <select id="src-file" onchange="loadSource()"></select>
-      <input type="text" id="src-goto" placeholder="行号" style="width:64px"
-             onkeydown="if(event.key==='Enter')gotoLine(this.value)">
-      <button class="btn" id="fmt-btn" onclick="toggleFormat()">格式化</button>
-      <span class="sub" id="src-info"></span>
-    </div>
-    <div id="src-scroll"></div>
-  </div>
-</div>
-
-<script>
-const CTRL = 'http://127.0.0.1:8778';
-let state = {
-  selected: null, agents: new Set(), versions: {},
-  net: {}, con: {}, netSel: null,
-  srcLines: null, srcFormatted: null, formatted: false,
-  srcFile: null, bps: new Set(), paused: {},
-  firstSeen: {},
-  // Include a short recent tail so opening/refreshing the dashboard does not
-  // erase events captured while the mini-program was being discovered.
-  lastT: Date.now()/1000 - 300,
-};
-function dot(id,on){document.getElementById(id).className='dot '+(on?'on':'off');}
-function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function ts(t){t=Number(t)||0;if(t>1e12)t/=1000;const d=new Date(t*1000);return d.toTimeString().slice(0,8);}
-
-/* ---------- app selector ---------- */
-function renderApps(targets){
-  const box=document.getElementById('apps');
-  let real=(targets||[]).filter(t=>t.appid&&t.appid.startsWith('wx'));
-  box.innerHTML='';
-  if(!real.length){box.innerHTML='<div class="sub" style="padding:6px">未发现小程序 — 开发者工具发起真机调试后，在微信打开任意小程序</div>';return;}
-  // track first-seen order
-  state.firstSeen = state.firstSeen || {};
-  for(const t of real) if(!state.firstSeen[t.appid]) state.firstSeen[t.appid]=Date.now();
-  // sort: 真机调试(v0) first, then by first-seen (launch order)
-  real = real.slice().sort((a,b)=>{
-    const av=(a.url.match(/servicewechat\.com\/wx[0-9a-f]+\/(\d+)\//)||[])[1];
-    const bv=(b.url.match(/servicewechat\.com\/wx[0-9a-f]+\/(\d+)\//)||[])[1];
-    if((av==='0')!==(bv==='0')) return av==='0'?-1:1;
-    return state.firstSeen[a.appid]-state.firstSeen[b.appid];
-  });
-  if(!state.selected||!real.find(t=>t.appid===state.selected)) state.selected=real[0].appid;
-  for(const t of real){
-    const a=t.appid;
-    const ver=(t.url.match(/servicewechat\.com\/wx[0-9a-f]+\/(\d+)\//)||[])[1];
-    state.versions[a]=ver;
-    const card=document.createElement('div');
-    card.className='app-card'+(a===state.selected?' selected':'');
-    card.onclick=()=>{state.selected=a;renderApps(targets);renderAll();};
-    const badges=[];
-    if(state.agents.has(a)) badges.push('<span class="badge agent">agent</span>');
-    if(ver==='0') badges.push('<span class="badge debug">真机调试</span>');
-    badges.push(`<span class="badge">v${esc(ver||'?')}</span>`);
-    card.innerHTML=`<span class="appid">${a}</span><span style="display:flex;gap:5px">${badges.join('')}</span>
-      <button onclick="event.stopPropagation();openDevtools('${t.targetId}','${a}')">DevTools</button>`;
-    box.appendChild(card);
-  }
-}
-function openDevtools(tid,appid){fetch('/api/open_devtools?target_id='+tid+'&appid='+appid);}
-
-/* ---------- tabs ---------- */
-document.querySelectorAll('.tab').forEach(el=>{
-  el.onclick=()=>{
-    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-    document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
-    el.classList.add('active');
-    document.getElementById('page-'+el.dataset.tab).classList.add('active');
-    if(el.dataset.tab==='storage') loadStorage();
-    if(el.dataset.tab==='source') loadFileList();
-  };
-});
-document.getElementById('repl-in').addEventListener('keydown',e=>{if(e.key==='Enter')sendEval();});
-
-/* ---------- events ---------- */
-function ingest(evs){
-  for(const e of evs){
-    const a=e.appid||'?';
-    state.agents.add(a);
-    const t=e.type;
-    if(t==='request'||t==='response'||t==='fail'){
-      (state.net[a]=state.net[a]||[]).push(e);
-      if(state.net[a].length>500) state.net[a].shift();
-    } else if(t==='console'||t==='error'||t==='route'||t==='eval_result'){
-      (state.con[a]=state.con[a]||[]).push(e);
-      if(state.con[a].length>400) state.con[a].shift();
-    } else if(t==='paused'){
-      state.paused[a]=e.data;
-    } else if(t==='resumed'){
-      delete state.paused[a];
-    }
-  }
-  renderPaused();
-}
-
-/* ---------- paused banner ---------- */
-function renderPaused(){
-  const bar=document.getElementById('paused-bar');
-  const p=state.paused[state.selected];
-  if(p){
-    bar.classList.add('show');
-    document.getElementById('paused-reason').textContent=
-      (p.frames&&p.frames[0]?`${p.frames[0].fn} @ ${(p.frames[0].url||'').split('/').pop()}:${p.frames[0].line}`:'')+(p.reason?` (${p.reason})`:'');
-    document.getElementById('paused-frames').innerHTML=
-      (p.frames||[]).map(f=>{
-        const file=(f.url||'').split('/').pop();
-        return `<div><span class="srclink" onclick="openSrcAt('${esc(file)}',${f.line},${f.col})">${esc(f.fn)}</span> ${esc(file)}:${f.line}:${f.col}</div>`;
-      }).join('');
-  } else bar.classList.remove('show');
-}
-async function dbgControl(action){
-  await fetch(CTRL+'/control',{method:'POST',body:JSON.stringify({appid:state.selected,action})});
-}
-async function sendEval(){
-  const el=document.getElementById('repl-in');
-  const code=el.value.trim(); if(!code) return;
-  (state.con[state.selected]=state.con[state.selected]||[]).push(
-    {t:Date.now()/1000,type:'console',data:{level:'info',args:['» '+code]}});
-  renderConsole();
-  try{
-    const r=await fetch(CTRL+'/eval',{method:'POST',body:JSON.stringify({appid:state.selected,code})});
-    const j=await r.json();
-    (state.con[state.selected]).push({t:Date.now()/1000,type:'console',
-      data:{level:j.frame?'warn':'info',args:['⇐ '+(j.value??JSON.stringify(j))+(j.frame?' (栈帧)':'')]}});
-    renderConsole();
-  }catch(e){
-    state.con[state.selected].push({t:Date.now()/1000,type:'console',data:{level:'error',args:['⇐ 请求失败: '+e]}});
-    renderConsole();
-  }
-}
-
-/* ---------- console ---------- */
-function fmtArg(x){
-  if(x===null||x===undefined) return String(x);
-  if(typeof x==='object'){
-    if(x.__err) return `${x.name}: ${x.message}\n${x.stack||''}`;
-    return JSON.stringify(x);
-  }
-  return String(x);
-}
-function srcLinksFor(text){
-  return text.replace(/((?:[\w.-]+\.js):(\d+):(\d+))/g,
-    (m,f,l,c)=>`<span class="srclink" onclick="openSrcAt('${f}',${l},${c})">${m}</span>`);
-}
-function renderConsole(){
-  const box=document.getElementById('console-scroll');
-  const q=(document.getElementById('con-filter').value||'').toLowerCase();
-  const lines=(state.con[state.selected]||[]).filter(e=>{
-    const raw=JSON.stringify(e.data||{});
-    if(raw.includes('8779/agent')) return false;   // hub retry noise
-    if(!q) return true;
-    return raw.toLowerCase().includes(q);
-  }).slice(-200);
-  document.getElementById('con-count').textContent=`${lines.length} 条`;
-  box.innerHTML=lines.map(e=>{
-    const d=e.data||{}; let text,level='log';
-    if(e.type==='console'){level=d.level||'log';text=(d.args||[]).map(fmtArg).join(' ');}
-    else if(e.type==='route'){level='info';text='▶ 页面: '+d.route;}
-    else if(e.type==='error'){level='error';text='✖ '+fmtArg(d.msg);}
-    else if(e.type==='eval_result'){level='info';text='⇐ '+fmtArg(d.data);}
-    else text=fmtArg(d);
-    return `<div class="cline lv-${esc(level)}"><span class="ts">${ts(e.t)}</span>${srcLinksFor(esc(text))}</div>`;
-  }).join('');
-  box.scrollTop=box.scrollHeight;
-}
-
-/* ---------- network ---------- */
-function shortUrl(u){u=String(u||'');try{const x=new URL(u);return (x.pathname+x.search).slice(0,80);}catch(e){return u.slice(0,80);}}
-function renderNet(){
-  const tb=document.getElementById('net-rows');
-  const q=(document.getElementById('net-filter').value||'').toLowerCase();
-  const evs=(state.net[state.selected]||[]).filter(e=>!q||String((e.data||{}).url||'').toLowerCase().includes(q));
-  document.getElementById('net-badge').textContent=evs.length?`(${evs.length})`:'';
-  document.getElementById('net-count').textContent=`${evs.length} 条`;
-  document.getElementById('net-empty').style.display=evs.length?'none':'block';
-  tb.innerHTML='';
-  for(const e of evs.slice().reverse()){
-    const d=e.data||{};
-    const tr=document.createElement('tr');
-    tr.className='nrow'+(state.netSel===d.id?' selected':'');
-    if(e.type==='request'){
-      tr.innerHTML=`<td class="m" style="color:var(--dim)">${ts(e.t)}</td>
-        <td class="m method ${esc(d.method||'GET')}">${esc(d.method||'GET')}</td>
-        <td class="m">${esc(shortUrl(d.url))}</td><td class="m" style="color:var(--dim)">…</td>`;
-    }else if(e.type==='response'){
-      const st=d.status||0;
-      tr.innerHTML=`<td class="m" style="color:var(--dim)">${ts(e.t)}</td>
-        <td class="m" style="color:var(--dim)">↳</td><td class="m" style="color:var(--dim)">${esc(shortUrl(d.url))}</td>
-        <td class="m s${String(st)[0]}">${st}</td>`;
-    }else{
-      tr.innerHTML=`<td class="m" style="color:var(--dim)">${ts(e.t)}</td>
-        <td class="m" style="color:var(--red)">✖</td><td class="m" style="color:var(--red)">${esc(shortUrl(d.url))}</td><td></td>`;
-    }
-    tr.onclick=()=>{state.netSel=d.id;renderNet();renderDetail(e);};
-    tb.appendChild(tr);
-  }
-}
-function parseHeader(h){const o={};if(typeof h==='string'){try{Object.assign(o,JSON.parse(h));return o;}catch(e){}}if(typeof h==='object'&&h)return h;return {};}
-function pretty(x){if(typeof x==='string'){try{return JSON.stringify(JSON.parse(x),null,1);}catch(e){return x;}}return fmtArg(x);}
-function renderDetail(e){
-  const box=document.getElementById('net-detail');
-  const d=e.data||{};
-  let req=null;
-  if(e.type!=='request') req=(state.net[state.selected]||[]).find(x=>x.type==='request'&&x.data&&x.data.id===d.id);
-  const kv=o=>Object.entries(o||{}).map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span>${esc(v)}</div>`).join('')||'<div class="sub">（无）</div>';
-  let html=`<div class="sec"><h3>概览</h3><div class="kv">
-    <span class="k">URL</span>${esc(d.url||'')}<br>
-    <span class="k">方法</span>${esc((req&&req.data.method)||d.method||'-')}<br>
-    <span class="k">状态</span>${d.status!==undefined?esc(d.status):'…'}<br>
-    <span class="k">时间</span>${ts(e.t)}<br>
-    <span class="k">API</span>${esc(d.api||'-')}</div></div>`;
-  if(req){
-    html+=`<div class="sec"><h3>请求头</h3>${kv(parseHeader(req.data.header))}</div>`;
-    html+=`<div class="sec"><h3>请求数据</h3><pre class="body">${esc(pretty(req.data.data))}</pre></div>`;
-  }
-  if(e.type==='response'){
-    html+=`<div class="sec"><h3>响应头</h3>${kv(parseHeader(d.header))}</div>`;
-    html+=`<div class="sec"><h3>响应体</h3><pre class="body">${esc(pretty(d.data))}</pre></div>`;
-  }
-  if(e.type==='fail') html+=`<div class="sec"><h3>失败</h3><pre class="body" style="color:var(--red)">${esc(fmtArg(d.err))}</pre></div>`;
-  box.innerHTML=html;
-}
-
-/* ---------- storage ---------- */
-async function loadStorage(){
-  const info=document.getElementById('st-info');
-  info.textContent='读取中…';
-  try{
-    const r=await fetch('/api/storage?appid='+state.selected);
-    const j=await r.json(); const d=j.data||{};
-    if(d.err){info.textContent='错误: '+d.err;return;}
-    info.textContent=`${d.currentSize??'?'} / ${d.limitSize??'?'} KB · ${((d.keys)||[]).length} keys`;
-    document.getElementById('st-rows').innerHTML=((d.kv&&Object.entries(d.kv))||[]).map(([k,v])=>
-      `<tr><td class="m">${esc(k)}</td><td class="m" style="word-break:break-all">${esc(String(v).slice(0,1500))}</td></tr>`).join('');
-    document.getElementById('st-empty').style.display=((d.keys)||[]).length?'none':'block';
-  }catch(e){info.textContent='读取失败: '+e;}
-}
-
-/* ---------- source + breakpoints ---------- */
-async function loadFileList(){
-  if(!state.selected) return;
-  const sel=document.getElementById('src-file');
-  if(sel.dataset.appid===state.selected&&sel.options.length) return;
-  sel.dataset.appid=state.selected;
-  sel.innerHTML='<option>加载中…</option>';
-  try{
-    const r=await fetch('/api/files?appid='+state.selected);
-    const j=await r.json();
-    sel.innerHTML=(j.files||[]).map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join('')||'<option>（无）</option>';
-    await loadSource();
-  }catch(e){sel.innerHTML='<option>加载失败</option>';}
-}
-async function loadSource(hlLine,hlCol){
-  const sel=document.getElementById('src-file');
-  const file=sel.value;
-  if(!file||file.includes('（'))return;
-  state.srcFile=file;
-  document.getElementById('src-info').textContent='加载中…';
-  try{
-    const r=await fetch(`/api/source?appid=${state.selected}&file=${encodeURIComponent(file)}`);
-    const j=await r.json();
-    if(j.error){document.getElementById('src-info').textContent=j.error;return;}
-    state.srcLines=j.lines||[];
-    state.formatted=false; state.srcFormatted=null;
-    document.getElementById('fmt-btn').textContent='格式化';
-    renderSource(hlLine,hlCol);
-    document.getElementById('src-info').textContent=`${file} · ${state.srcLines.length} 行${hlLine?' · 已定位 L'+hlLine:''}`;
-  }catch(e){document.getElementById('src-info').textContent='加载失败';}
-}
-function toggleFormat(){
-  if(!state.srcLines)return;
-  state.formatted=!state.formatted;
-  if(state.formatted&&window.js_beautify){
-    const src=state.srcLines.join('\n');
-    const fmt=js_beautify(src,{indent_size:2,preserve_newlines:false});
-    state.srcFormatted=fmt.split('\n');
-    document.getElementById('src-info').textContent+='（格式化后行号≠报错行号）';
-  }
-  document.getElementById('fmt-btn').textContent=state.formatted?'原始':'格式化';
-  renderSource();
-}
-function renderSource(hlLine,hlCol){
-  const box=document.getElementById('src-scroll');
-  const lines=state.formatted?(state.srcFormatted||[]):state.srcLines;
-  if(!lines){box.innerHTML='<div class="empty">选择文件</div>';return;}
-  const bps=state.bps;
-  const frag=[];
-  for(let i=0;i<lines.length;i++){
-    const n=i+1;
-    const key=state.srcFile+':'+n;
-    const cls=(hlLine===n?' hl':'')+(bps.has(key)?' bp':'');
-    frag.push(`<div class="srcline${cls}" id="L${n}"><span class="no" onclick="toggleBp(${n})">${n}</span>${esc(lines[i]||'')}</div>`);
-  }
-  box.innerHTML=frag.join('');
-  if(hlLine){const el=document.getElementById('L'+hlLine);if(el)el.scrollIntoView({block:'center'});}
-  else box.scrollTop=0;
-}
-async function toggleBp(line){
-  const key=state.srcFile+':'+line;
-  const removing=state.bps.has(key);
-  try{
-    const r=await fetch(CTRL+'/breakpoint',{method:'POST',body:JSON.stringify({
-      appid:state.selected,file:state.srcFile,line,remove:removing})});
-    const j=await r.json();
-    if(j.ok){ removing?state.bps.delete(key):state.bps.add(key); }
-    else { (state.con[state.selected]=state.con[state.selected]||[]).push(
-      {t:Date.now()/1000,type:'console',data:{level:'error',args:['断点失败: '+JSON.stringify(j.raw||j)]}});
-      renderConsole(); }
-  }catch(e){}
-  renderSource();
-}
-function gotoLine(n){const ln=parseInt(n);renderSource(ln);const el=document.getElementById('L'+ln);if(el)el.scrollIntoView({block:'center'});}
-function openSrcAt(ref,line,col){
-  document.querySelector('.tab[data-tab=source]').click();
-  const sel=document.getElementById('src-file');
-  const pick=()=>{loadSource(line,col);};
-  if(sel.dataset.appid!==state.selected){
-    loadFileList().then(()=>{for(const o of sel.options){if(o.value.endsWith(ref)||o.value===ref){sel.value=o.value;break;}}pick();});
-  }else{
-    for(const o of sel.options){if(o.value.endsWith(ref)||o.value===ref){if(sel.value!==o.value){sel.value=o.value;}break;}}
-    if(state.srcFile===sel.value&&state.srcLines) renderSource(line,col); else pick();
-  }
-}
-
-/* ---------- poll ---------- */
-function renderAll(){renderConsole();renderNet();renderPaused();}
-async function poll(){
-  try{
-    const r=await fetch('/api/status');const st=await r.json();
-    dot('d-sniper',st.sniper);dot('d-gateway',st.gateway);dot('d-sess',st.sess);
-    const bt=document.getElementById('bridge-tag');
-    const bs=st.bridge_state||'?';
-    if(bs==='up'){
-      bt.textContent='桥: '+(st.bridge||'?')+' (正常)';
-      bt.style.color='';
-    } else if(bs==='connecting'){
-      bt.textContent='桥连接中… (寻找端口/若无反应请重新发起真机调试)';
-      bt.style.color='var(--amber)';
-    } else {
-      bt.textContent='桥未连接 — 请发起真机调试';
-      bt.style.color='var(--red)';
-    }
-    renderApps(st.targets);
-    const r2=await fetch('/api/events?since='+state.lastT);
-    const evs=await r2.json();
-    if(Array.isArray(evs)&&evs.length){
-      ingest(evs);
-      for(const e of evs) if(e.t>state.lastT) state.lastT=e.t;
-      renderConsole();renderNet();
-    }
-  }catch(e){}
-}
-poll(); setInterval(poll,2000);
-</script>
+  <dialog id="settings-dialog"><form id="settings-form"><div class="dialog-heading"><h2>捕获设置</h2><button class="icon-btn" type="button" id="settings-close" aria-label="关闭设置" data-tip="关闭"><i data-lucide="x"></i></button></div><label class="setting-field">请求体上限 <span>字符</span><input type="number" name="request_body" min="256" max="1048576" required></label><label class="setting-field">响应体上限 <span>字符</span><input type="number" name="response_body" min="256" max="1048576" required></label><label class="setting-field">请求头 / 响应头上限 <span>字符</span><input type="number" name="headers" min="256" max="1048576" required></label><div class="notice hidden" id="settings-error" role="alert"></div><div class="dialog-actions"><button class="btn" type="button" id="settings-reset">恢复默认</button><button class="btn primary" type="submit" id="settings-save">保存设置</button></div></form></dialog>
+  <div id="toast" class="toast hidden" role="status"></div>
 </body>
 </html>

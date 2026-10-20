@@ -14,7 +14,7 @@ function fixture() {
         onOpen(fn) { this.handlers.open = fn; },
         onClose(fn) { this.handlers.close = fn; },
         onError(fn) { this.handlers.error = fn; },
-        onMessage() {},
+        onMessage(fn) { this.handlers.message = fn; },
         send(options) {
           if (this.rejectSend) throw new Error('temporarily unavailable');
           this.sent.push(JSON.parse(options.data));
@@ -97,4 +97,53 @@ function fixture() {
   assert.equal(f.intervals.size, 0);
 }
 
-console.log('Agent regressions passed: delivery, retry, unique ids, reinjection.');
+{
+  const f = fixture(), socket = f.sockets[0];
+  socket.handlers.open();
+  socket.handlers.message({ data: JSON.stringify({ config: { request_body: 256 } }) });
+  f.context.wx.request({ url: 'https://test.invalid', data: 'a'.repeat(500) });
+  const request = socket.sent[0].events[0].data;
+  assert.equal(request.data.length, 256);
+  assert.equal(request.capture.body.truncated, true);
+  assert.equal(request.capture.body.original_chars, 500);
+  assert.equal(request.capture.body.captured_chars, 256);
+  socket.handlers.message({ data: JSON.stringify({ config: { request_body: 1024 } }) });
+  socket.callbacks[0].success();
+  f.flush(); socket.callbacks[1].success();
+  f.context.wx.request({ url: 'https://test.invalid', data: 'a'.repeat(500) });
+  assert.equal(socket.sent[2].events[0].data.capture.body.truncated, false);
+  assert.equal(socket.sent[2].events[0].data.data.length, 500);
+}
+
+{
+  const f = fixture();
+  const body = { nested: { value: 'before' } };
+  f.context.wx.request({ url: 'https://test.invalid', data: body });
+  body.nested.value = 'after';
+  assert.equal(f.context.__REA__.events[0].data.data.nested.value, 'before',
+    'capture must retain a snapshot instead of the mutable request body');
+  const circular = {}; circular.self = circular;
+  let callbacks = 0;
+  assert.equal(f.context.wx.request({ url: 'https://test.invalid/circular', data: circular,
+    success() { callbacks++; } }), 'request-task');
+  assert.equal(callbacks, 1, 'unserializable data must not interrupt the original request');
+  assert.doesNotThrow(() => JSON.stringify(f.context.__REA__.events));
+  assert.doesNotThrow(() => f.context.__REA__.capture({
+    toJSON() { throw new Error('json'); },
+    toString() { throw new Error('string'); },
+  }, 256));
+}
+
+{
+  const f = fixture();
+  f.context.wx.request({ url: 'https://test.invalid' });
+  f.sockets[0].handlers.error();
+  assert.equal(f.timeouts.size, 1);
+  f.context.__REA__.reconnect();
+  assert.equal(f.timeouts.size, 0, 'manual reconnect cancels the pending backoff');
+  assert.equal(f.sockets.length, 2, 'manual reconnect starts immediately');
+  f.sockets[1].handlers.open();
+  assert.equal(f.sockets[1].sent[0].events.length, 2, 'reconnect retains queued events');
+}
+
+console.log('Agent regressions passed: delivery, retry, unique ids, reinjection, capture safety, manual reconnect.');

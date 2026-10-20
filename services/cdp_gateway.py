@@ -19,6 +19,10 @@ import sys
 import time
 
 import websockets
+try:
+    from .event_store import read_events
+except ImportError:
+    from event_store import read_events
 
 GW_PORT = 9333
 LOGDIR = ("/Users/yangyiming/Library/Application Support/微信开发者工具/"
@@ -164,10 +168,9 @@ class NetInjector:
         self.ws = front_ws
         self.appid = appid
         self.bodies = OrderedDict()
-        self.offsets = {"Runtime": self._start_offset(),
-                        "Network": self._start_offset()}
+        self.body_bytes = 0
+        self.offsets = {"Runtime": None, "Network": None}
         self.initial_offsets = dict(self.offsets)
-        self.inodes = {}
         self.enabled = {"Runtime": False, "Network": False}
         self.seen = OrderedDict()
         self.active = True
@@ -192,13 +195,10 @@ class NetInjector:
                             "auxData": {"isDefault": False}}})
             self.context_sent = True
 
-    @staticmethod
-    def _start_offset():
-        try:
-            size = os.path.getsize(AGENT_EVENTS)
-            return max(0, size - 2 * 1024 * 1024)
-        except OSError:
-            return 0
+    def trim_bodies(self):
+        while len(self.bodies) > 2000 or self.body_bytes > 32 * 1024 * 1024:
+            _, body = self.bodies.popitem(last=False)
+            self.body_bytes -= body.get("size", 0)
 
     async def send_event(self, method, params):
         try:
@@ -209,39 +209,10 @@ class NetInjector:
 
     async def _new_events(self, domain):
         """Read agent events appended since our last read."""
-        out = []
-        try:
-            stat = os.stat(AGENT_EVENTS)
-            offset = self.offsets[domain]
-            if (offset > stat.st_size or
-                    self.inodes.get(domain, stat.st_ino) != stat.st_ino):
-                offset = 0
-            self.inodes[domain] = stat.st_ino
-            start = max(0, stat.st_size - 2 * 1024 * 1024)
-            with open(AGENT_EVENTS, "rb") as f:
-                if offset <= start and start:
-                    f.seek(start)
-                    f.readline()  # discard a possibly partial UTF-8/JSON line
-                else:
-                    f.seek(offset)
-                while True:
-                    pos = f.tell()
-                    line = f.readline()
-                    if not line or not line.endswith(b"\n"):
-                        self.offsets[domain] = pos
-                        break
-                    try:
-                        e = json.loads(line)
-                    except (ValueError, UnicodeDecodeError):
-                        continue
-                    kind = e.get("type")
-                    if ((domain == "Runtime" and kind in ("console", "error")) or
-                            (domain == "Network" and kind in
-                             ("request", "response", "fail"))):
-                        out.append(e)
-        except OSError:
-            return out
-        return out
+        page = read_events(path=AGENT_EVENTS, cursor=self.offsets[domain], limit=1000)
+        self.offsets[domain] = page["cursor"]
+        kinds = ("console", "error") if domain == "Runtime" else ("request", "response", "fail")
+        return [event for event in page["events"] if event.get("type") in kinds]
 
     async def feed(self):
         if not self.active or not self.ready:
@@ -254,7 +225,8 @@ class NetInjector:
         for e in records:
             if e.get("appid") != self.appid:
                 continue
-            t = e.get("t", time.time())
+            t = (e["agent_t"] / 1000 if isinstance(e.get("agent_t"), (int, float))
+                 else e.get("t", time.time()))
             d = e.get("data") or {}
             rid = "rea:" + str(d.get("id") or f"{t}-{e.get('type')}")
             if e.get("type") in ("request", "response", "fail"):
@@ -287,10 +259,14 @@ class NetInjector:
                 body = d.get("data")
                 if body is not None and not isinstance(body, str):
                     body = json.dumps(body, ensure_ascii=False)
+                capture = (d.get("capture") or {}).get("body") or {}
+                if capture.get("truncated"):
+                    body = (body or "") + "\n[REA: request body truncated at " + str(capture.get("limit")) + " characters]"
+                size = len((body or "").encode("utf-8"))
                 self.bodies[rid] = {"req": body, "resp": None,
-                                    "mime": guess_mime(body)}
-                if len(self.bodies) > 2000:
-                    self.bodies.popitem(last=False)
+                                    "mime": guess_mime(body), "size": size}
+                self.body_bytes += size
+                self.trim_bodies()
                 await self.send_event("Network.requestWillBeSent", {
                     "requestId": rid,
                     "loaderId": "rea",
@@ -322,9 +298,15 @@ class NetInjector:
                 body = d.get("data")
                 if body is not None and not isinstance(body, str):
                     body = json.dumps(body, ensure_ascii=False)
+                capture = (d.get("capture") or {}).get("body") or {}
+                if capture.get("truncated"):
+                    body = (body or "") + "\n[REA: response body truncated at " + str(capture.get("limit")) + " characters]"
                 b["resp"] = body
                 b["mime"] = guess_mime(body)
                 length = len((body or "").encode("utf-8"))
+                b["size"] += length
+                self.body_bytes += length
+                self.trim_bodies()
                 await self.send_event("Network.responseReceived", {
                     "requestId": rid,
                     "loaderId": "rea",
@@ -373,10 +355,6 @@ class NetInjector:
             except Exception as exc:
                 _log(f"event feed failed: {type(exc).__name__}: {exc}")
             await asyncio.sleep(0.2)
-
-
-# commands the gateway answers itself (never forwarded to the bridge)
-LOCAL_METHODS = {"Network.getResponseBody", "Network.getRequestPostData"}
 
 
 async def proxy_session(front_ws, target_id, bridge_port, appid=None):

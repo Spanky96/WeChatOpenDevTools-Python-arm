@@ -1,4 +1,4 @@
-// __REA__ agent v7 - injected into the mini-program service context.
+// __REA__ agent v9 - injected into the mini-program service context.
 //
 // Captures into globalThis.__REA__.events (polled by service_session.py):
 //   request/response/fail  — wx.request family with full detail
@@ -12,20 +12,45 @@
 (function () {
   var previous = globalThis.__REA__;
   if (typeof globalThis.__REA__ !== 'undefined' &&
-      globalThis.__REA__.version >= 7) return;
+      globalThis.__REA__.version >= 9) return;
   if (previous && previous.dispose) previous.dispose();
 
   var events = [];
   var MAX = 3000;
   var boot = Date.now(), sequence = 0, requestSequence = 0;
   var legacyQueues = previous ? (previous.queues || [previous.events]) : [];
-  var timers = [], stopped = false;
+  var timers = [], stopped = false, queuedChars = 0;
+  var eventSizes = [], MAX_CHARS = 4 * 1024 * 1024;
+  var legacyHooks = [];
+  var limits = { request_body: 32768, response_body: 131072, headers: 16384 };
+  function configure(config) {
+    Object.keys(limits).forEach(function (key) {
+      var value = config && config[key];
+      if (typeof value === 'number' && value >= 256 && value <= 1048576)
+        limits[key] = Math.floor(value);
+    });
+  }
+  configure(globalThis.__REA_CAPTURE__);
+  function capture(value, limit) {
+    var text, snapshot;
+    try {
+      text = typeof value === 'string' ? value : JSON.stringify(value);
+      snapshot = typeof value === 'string' || text === undefined ? value : JSON.parse(text);
+      if (text === undefined) snapshot = undefined;
+    } catch (e) {
+      try { text = String(value); } catch (_) { text = '[unserializable]'; }
+      snapshot = text;
+    }
+    if (typeof text !== 'string') text = '';
+    var truncated = text.length > limit;
+    return { value: truncated ? text.slice(0, limit) : snapshot,
+      meta: { truncated: truncated, original_chars: text.length,
+              captured_chars: Math.min(text.length, limit), limit: limit } };
+  }
   function report(type, data) {
-    if (events.length >= MAX) events.splice(0, events.length - MAX);
     var e = { t: Date.now(), seq: boot + '-' + (++sequence),
               type: type, data: data };
-    events.push(e);
-    if (globalThis.__REA__) globalThis.__REA__.push([e]);
+    try { if (globalThis.__REA__) globalThis.__REA__.push([e]); } catch (_) {}
   }
 
   function shallow(x, n) {
@@ -47,24 +72,34 @@
     try {
       if (typeof wx === 'undefined' || !wx[name]) return;
       var orig = wx[name];
-      if (orig.__reaWrapped) return;
+      if (orig.__reaWrapped && !orig.__reaOriginal) {
+        legacyHooks.push(name);
+        return;
+      }
+      orig = orig.__reaOriginal || orig;
       function wrapped(opts) {
         opts = opts || {};
         var id = boot + '-' + (++requestSequence);
+        var current = globalThis.__REA__;
+        var body = current.capture(opts.data, current.limits.request_body);
+        var headers = current.capture(opts.header, current.limits.headers);
         report('request', {
           id: id, api: name, url: opts.url,
-          method: opts.method || 'GET',
-          data: shallow(opts.data, 3000),
-          header: shallow(opts.header, 1000),
+          method: opts.method || (name === 'uploadFile' ? 'POST' : 'GET'),
+          data: body.value, header: headers.value,
+          capture: { body: body.meta, headers: headers.meta },
         });
         var w = Object.assign({}, opts);
         w.success = function (res) {
           res = res || {};
+          var current = globalThis.__REA__;
+          var body = current.capture(res.data, current.limits.response_body);
+          var headers = current.capture(res.header, current.limits.headers);
           report('response', {
             id: id, api: name, url: opts.url,
             status: res.statusCode,
-            header: shallow(res.header, 1000),
-            data: shallow(res.data, 8000),
+            header: headers.value, data: body.value,
+            capture: { body: body.meta, headers: headers.meta },
           });
           if (opts.success) opts.success(res);
         };
@@ -76,6 +111,7 @@
         return orig.call(wx, w);
       }
       wrapped.__reaWrapped = true;
+      wrapped.__reaOriginal = orig;
       Object.defineProperty(wx, name,
                             { value: wrapped, writable: true,
                               configurable: true });
@@ -166,7 +202,7 @@
     connecting = true;
     try {
       var current = wx.connectSocket({
-        url: 'ws://127.0.0.1:8779/agent?appid=' + APPID + '&v=7' });
+        url: 'ws://127.0.0.1:8779/agent?appid=' + APPID + '&v=9' });
       sock = current;
       current.onOpen(function () {
         if (stopped || current !== sock) return;
@@ -182,12 +218,31 @@
         if (stopped || current !== sock) return;
         connecting = false; sockOpen = false; sending = false; scheduleRetry();
       });
-      current.onMessage(function () {});
+      current.onMessage(function (message) {
+        if (stopped || current !== sock) return;
+        try { configure(JSON.parse(message.data).config); } catch (e) {}
+      });
     } catch (e) { connecting = false; scheduleRetry(); }
+  }
+  function reconnect() {
+    if (stopped) return;
+    var previousSocket = sock;
+    sock = null; sockOpen = false; connecting = false; sending = false;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    backoff = 2000;
+    try { if (previousSocket) previousSocket.close({}); } catch (_) {}
+    connectHub();
   }
   function flush() {
     if (stopped || !sockOpen || sending || !events.length) return;
-    var batch = events.slice(0, 500);
+    var count = 0, chars = 0;
+    while (count < events.length && count < 500) {
+      var size = eventSizes[count] || JSON.stringify(events[count]).length;
+      if (count && chars + size > 1024 * 1024) break;
+      chars += size;
+      count++;
+    }
+    var batch = events.slice(0, count);
     sending = true;
     try {
       sock.send({ data: JSON.stringify({ events: batch }),
@@ -196,7 +251,10 @@
             if (!queue) return;
             batch.forEach(function (e) {
               var at = queue.indexOf(e);
-              if (at >= 0) queue.splice(at, 1);
+              if (at >= 0) {
+                queue.splice(at, 1);
+                if (queue === events) queuedChars -= eventSizes.splice(at, 1)[0] || 0;
+              }
             });
           });
           sending = false;
@@ -211,12 +269,19 @@
   }, 10000));
 
   globalThis.__REA__ = {
-    events: events, queues: [events].concat(legacyQueues), version: 7, boot: boot,
+    events: events, queues: [events].concat(legacyQueues), version: 9, boot: boot,
+    capture: capture, limits: limits, configure: configure, legacyHooks: legacyHooks,
+    reconnect: reconnect,
     push: function (batch) {
       batch.forEach(function (e) {
-        if (events.indexOf(e) < 0) events.push(e);
+        if (events.indexOf(e) < 0) {
+          var size = JSON.stringify(e).length;
+          events.push(e); eventSizes.push(size); queuedChars += size;
+        }
       });
-      if (events.length > MAX) events.splice(0, events.length - MAX);
+      while (events.length > MAX || (queuedChars > MAX_CHARS && events.length > 1)) {
+        events.shift(); queuedChars -= eventSizes.shift() || 0;
+      }
       flush();
     },
     dispose: function () {
@@ -238,6 +303,7 @@
     },
     drain: function (n) {
       var out = events.splice(0, n || events.length);
+      eventSizes.splice(0, out.length).forEach(function (size) { queuedChars -= size; });
       return out;
     },
   };

@@ -83,6 +83,8 @@ def emit_agent(appid, event):
 def find_port():
     """Bridge port: DevTools log first; lsof fallback (watch listeners,
     never touches the relay — probing the relay kills its client slot)."""
+    if os.environ.get("WECHAT_DEBUG_MODE") == "direct":
+        return 9422
     ports = []
     for f in sorted(glob.glob(os.path.join(LOGDIR, "*.log")),
                     key=os.path.getmtime)[-4:]:
@@ -258,6 +260,15 @@ async def eval_js(br, sid, ctx, expr, timeout=8):
     return None
 
 
+async def is_service_context(br, sid, context_id, appid):
+    if os.environ.get("WECHAT_DEBUG_MODE") != "direct":
+        return await eval_js(br, sid, context_id, "typeof wx", timeout=3) == "object"
+    expression = ("(function(){try{return typeof wx==='object' && typeof getApp==='function' && "
+                  "wx.getAccountInfoSync().miniProgram.appId===" + json.dumps(appid) +
+                  "}catch(e){return false}})()")
+    return await eval_js(br, sid, context_id, expression, timeout=3) is True
+
+
 DUMP_STORAGE_JS = (
     "(function(){try{var i=wx.getStorageInfoSync();var kv={};"
     "(i.keys||[]).slice(0,120).forEach(function(k){var v;"
@@ -266,6 +277,8 @@ DUMP_STORAGE_JS = (
     "return JSON.stringify({keys:i.keys||[],sz:i.currentSize,"
     "limit:i.limitSize,kv:kv})}catch(e){"
     "return JSON.stringify({err:String(e)})}})()")
+with open(os.path.join(ROOT, "scripts", "wx_storage_snapshot.js"), encoding="utf-8") as _snapshot:
+    CDP_STORAGE_JS = _snapshot.read()
 
 
 def retry_later(appid, target_id, sid, reason):
@@ -286,6 +299,7 @@ def app_status(appid, target_id=None):
     if value and not online:
         phase = "connecting" if now - diag.get("since", now) < 15 else "offline"
     return {**diag, "phase": phase, "agent_online": online,
+            "context_id": value.get("ctx"),
             "agent_version": HUB_VERSION.get(appid) or value.get("agent_version"),
             "last_event_at": LAST_EVENT.get(appid), "heartbeat_at": ONLINE.get(appid),
             "retry_in": max(0, round(retry.get("next_retry", 0) - now, 1)),
@@ -346,6 +360,8 @@ async def setup_targets(br):
         # on 4.1.13. Give the target a second short window before marking it
         # failed for the full cooldown period.
         for attempt in range(2):
+            if attempt and os.environ.get("WECHAT_DEBUG_MODE") == "direct":
+                await br.cmd("Runtime.disable", sid, timeout=3)
             result = await br.cmd("Runtime.enable", sid, timeout=5)
             if isinstance(result, dict) and ("code" in result or "_err" in result):
                 invalid_session = True
@@ -358,8 +374,7 @@ async def setup_targets(br):
                     and e.get("params", {}).get("context")]
             ctxs += [context for context in cached.values() if context not in ctxs]
             for c in ctxs:
-                if await eval_js(br, sid, c.get("id"), "typeof wx",
-                                 timeout=3) == "object":
+                if await is_service_context(br, sid, c.get("id"), appid):
                     svc = c.get("id")
                     break
             if svc is not None:
@@ -378,8 +393,8 @@ async def setup_targets(br):
         DIAGNOSTICS[appid] = {"phase": "injecting", "since": time.time()}
         agent_src = "globalThis.__REA_CAPTURE__=" + json.dumps(load_config()) + ";\n" + agent_src
         version = await eval_js(br, sid, svc,
-                               agent_src + "\n;globalThis.__REA__.version", timeout=9)
-        if not isinstance(version, (int, float)) or version < 9:
+                               agent_src + "\n;globalThis.__REA__.version\n//# sourceURL=rea://agent.js", timeout=9)
+        if not isinstance(version, (int, float)) or version < 10:
             print(f"[sess] agent injection unconfirmed -> {appid}", flush=True)
             retry_later(appid, t["targetId"], sid, "agent 注入尚未确认")
             continue
@@ -388,7 +403,7 @@ async def setup_targets(br):
         # NOTE: Debugger.enable stays OFF by default — enabling it on the
         # service context stalls live event capture (observed 2026-10-19).
         # It is enabled on demand by the first /breakpoint request.
-        MP[appid] = {"sid": sid, "ctx": svc, "targetId": t["targetId"],
+        MP[appid] = {"appid": appid, "sid": sid, "ctx": svc, "targetId": t["targetId"],
                      "scripts": {}, "paused": None,
                      "topFrame": None, "bps": {}, "fails": 0,
                      "dbg": False, "agent_version": version,
@@ -412,14 +427,17 @@ async def setup_targets(br):
 async def refresh_ctx(br, v):
     """Re-discover the service context (contexts change on page
     recreation; stale contextId makes every evaluate silently fail)."""
+    if os.environ.get("WECHAT_DEBUG_MODE") == "direct":
+        await br.cmd("Runtime.disable", v["sid"], timeout=3)
     await br.cmd("Runtime.enable", v["sid"], timeout=5)
     evs = await br.drain(1.0)
     ctxs = [e["params"]["context"] for e in evs
             if e.get("method") == "Runtime.executionContextCreated"
             and e.get("sessionId") == v["sid"]]
+    cached = br.contexts.get(v["sid"], {}) if isinstance(br.contexts, dict) else {}
+    ctxs += [context for context in cached.values() if context not in ctxs]
     for c in ctxs:
-        if await eval_js(br, v["sid"], c.get("id"), "typeof wx",
-                         timeout=4) == "object":
+        if await is_service_context(br, v["sid"], c.get("id"), v.get("appid")):
             if c.get("id") != v["ctx"]:
                 print(f"[sess] ctx refreshed -> {c.get('id')}", flush=True)
             v["ctx"] = c.get("id")
@@ -513,7 +531,8 @@ async def process_ctrl(br, req):
                          "等小程序出现在列表中再试"}
     try:
         if req.get("path") == "/storage":
-            raw = await eval_js(br, v["sid"], v["ctx"], DUMP_STORAGE_JS, timeout=6)
+            expression = CDP_STORAGE_JS if req.get("format") == "cdp" else DUMP_STORAGE_JS
+            raw = await eval_js(br, v["sid"], v["ctx"], expression, timeout=6)
             data = json.loads(raw) if isinstance(raw, str) else {"err": "上下文不可用"}
             return {"appid": appid, "data": data}
         if req.get("path") == "/breakpoint":
@@ -521,13 +540,19 @@ async def process_ctrl(br, req):
             f = req.get("file", "app-service.js")
             url = ("https://usr/" + f) if "/" not in f else f
             v.setdefault("bps", {})
+            key = f"{f}:{line}"
             if req.get("remove"):
-                bpid = v["bps"].pop(f"{f}:{line}", None)
+                bpid = v["bps"].get(key)
                 if not bpid:
                     return {"ok": False, "error": "no such breakpoint"}
                 r = await br.cmd("Debugger.removeBreakpoint", v["sid"],
                                  breakpointId=bpid, timeout=8)
+                if not isinstance(r, dict) or any(k in r for k in ("_err", "code", "error")):
+                    return {"ok": False, "error": "移除断点未确认，请重试", "raw": r}
+                v["bps"].pop(key, None)
                 return {"ok": True, "removed": bpid}
+            if key in v["bps"]:
+                return {"ok": True, "breakpointId": v["bps"][key]}
             if not await ensure_debugger(br, v):
                 return {"ok": False,
                         "error": "Debugger.enable failed (bridge)"}
@@ -536,7 +561,7 @@ async def process_ctrl(br, req):
                              columnNumber=0, timeout=8)
             bpid = (r or {}).get("breakpointId")
             if bpid:
-                v["bps"][f"{f}:{line}"] = bpid
+                v["bps"][key] = bpid
             return {"ok": bool(bpid), "breakpointId": bpid,
                     "locations": (r or {}).get("locations", []),
                     "raw": r}
@@ -708,6 +733,7 @@ class CtrlHandler(BaseHTTPRequestHandler):
         if self.path.split("?")[0] == "/status":
             self._json({"bridge_state": BRIDGE["state"],
                         "bridge_port": BRIDGE["port"],
+                        "debug_mode": os.environ.get("WECHAT_DEBUG_MODE", "bridge"),
                         "targetInfos": list(TARGETS_CACHE),
                         "targets": [{"appid": (re.search(r"(wx[0-9a-f]{16})", t.get("url", "")) or [None, None])[1],
                                      "url": t.get("url", "")[:90],
@@ -799,7 +825,7 @@ async def run_session(port):
     WAKE = asyncio.Event()
     BRIDGE["state"], BRIDGE["port"] = "connecting", port
     async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=3,
-                                  max_size=2**24) as ws:
+                                  max_size=2**25) as ws:
         br = Br(ws)
         await br.start()
         ctrl_task = asyncio.create_task(ctrl_loop(br))

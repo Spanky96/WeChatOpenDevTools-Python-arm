@@ -1,4 +1,4 @@
-// __REA__ agent v9 - injected into the mini-program service context.
+// __REA__ agent v10 - injected into the mini-program service context.
 //
 // Captures into globalThis.__REA__.events (polled by service_session.py):
 //   request/response/fail  — wx.request family with full detail
@@ -12,7 +12,7 @@
 (function () {
   var previous = globalThis.__REA__;
   if (typeof globalThis.__REA__ !== 'undefined' &&
-      globalThis.__REA__.version >= 9) return;
+      globalThis.__REA__.version >= 10) return;
   if (previous && previous.dispose) previous.dispose();
 
   var events = [];
@@ -68,6 +68,18 @@
   // ---- wx.request family ----
   // wx.request is writable:false (but configurable:true) — plain
   // assignment silently fails; must use Object.defineProperty.
+  function requestStack() {
+    try {
+      return String(new Error().stack || '').slice(0, 12000).split('\n').slice(1, 25)
+        .map(function (line) {
+          var match = line.trim().match(/^at\s+(?:(.*?)\s+\()?(.+?):(\d+):(\d+)\)?$/);
+          if (!match || /^(?:rea:\/\/|<anonymous>|eval at )/.test(match[2])) return null;
+          return { functionName: match[1] || '', scriptId: '', url: match[2],
+            lineNumber: Math.max(0, Number(match[3]) - 1),
+            columnNumber: Math.max(0, Number(match[4]) - 1) };
+        }).filter(function (frame) { return frame !== null; });
+    } catch (_) { return []; }
+  }
   function wrapRequest(name) {
     try {
       if (typeof wx === 'undefined' || !wx[name]) return;
@@ -88,6 +100,7 @@
           method: opts.method || (name === 'uploadFile' ? 'POST' : 'GET'),
           data: body.value, header: headers.value,
           capture: { body: body.meta, headers: headers.meta },
+          stack: current.requestStack(),
         });
         var w = Object.assign({}, opts);
         w.success = function (res) {
@@ -202,7 +215,7 @@
     connecting = true;
     try {
       var current = wx.connectSocket({
-        url: 'ws://127.0.0.1:8779/agent?appid=' + APPID + '&v=9' });
+        url: 'ws://127.0.0.1:8779/agent?appid=' + APPID + '&v=10' });
       sock = current;
       current.onOpen(function () {
         if (stopped || current !== sock) return;
@@ -269,7 +282,8 @@
   }, 10000));
 
   globalThis.__REA__ = {
-    events: events, queues: [events].concat(legacyQueues), version: 9, boot: boot,
+    events: events, queues: [events].concat(legacyQueues), version: 10, boot: boot,
+    requestStack: requestStack,
     capture: capture, limits: limits, configure: configure, legacyHooks: legacyHooks,
     reconnect: reconnect,
     push: function (batch) {

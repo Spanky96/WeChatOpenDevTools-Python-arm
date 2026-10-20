@@ -21,8 +21,10 @@ import time
 import websockets
 try:
     from .event_store import read_events
+    from .cdp_storage import WxStorageAdapter
 except ImportError:
     from event_store import read_events
+    from cdp_storage import WxStorageAdapter
 
 GW_PORT = 9333
 LOGDIR = ("/Users/yangyiming/Library/Application Support/微信开发者工具/"
@@ -44,6 +46,8 @@ def _log(msg):
 
 
 def find_bridge_port():
+    if os.environ.get("WECHAT_DEBUG_MODE") == "direct":
+        return 9422
     try:
         files = sorted((f for f in os.listdir(LOGDIR) if f.endswith(".log")),
                        key=lambda f: os.path.getmtime(os.path.join(LOGDIR, f)))
@@ -177,6 +181,34 @@ class NetInjector:
         self.context_id = 2_147_483_647
         self.context_sent = False
         self.ready = True
+        self.script_ids = {}
+
+    def observe(self, message):
+        if message.get("method") == "Debugger.globalObjectCleared":
+            self.script_ids.clear()
+        if message.get("method") == "Debugger.scriptParsed":
+            params = message.get("params") or {}
+            if params.get("url") and params.get("scriptId") and len(self.script_ids) < 4096:
+                # The same URL can belong to several isolated V8 contexts.
+                previous = self.script_ids.get(params["url"], params["scriptId"])
+                self.script_ids[params["url"]] = params["scriptId"] if previous == params["scriptId"] else ""
+
+    def initiator(self, data):
+        frames = []
+        stack = data.get("stack")
+        for frame in (stack[:24] if isinstance(stack, list) else []):
+            if not isinstance(frame, dict) or not isinstance(frame.get("url"), str):
+                continue
+            try:
+                line = max(0, int(frame.get("lineNumber", 0)))
+                column = max(0, int(frame.get("columnNumber", 0)))
+            except (ValueError, TypeError, OverflowError):
+                continue
+            url = frame["url"]
+            frames.append({"functionName": str(frame.get("functionName") or ""),
+                           "scriptId": self.script_ids.get(url, ""), "url": url,
+                           "lineNumber": line, "columnNumber": column})
+        return {"type": "script", "stack": {"callFrames": frames}} if frames else {"type": "other"}
 
     async def enable(self, domain):
         if domain == "Runtime" and not self.enabled[domain]:
@@ -283,13 +315,7 @@ class NetInjector:
                     "wallTime": t,
                     "redirectHasExtraInfo": False,
                     "type": "XHR",
-                    "initiator": {"type": "script",
-                                  "stack": {"callFrames": [{
-                                      "functionName": "wx.request",
-                                      "scriptId": "",
-                                      "url": "app-service.js",
-                                      "lineNumber": 0,
-                                      "columnNumber": 0}]}},
+                    "initiator": self.initiator(d),
                 })
             elif e.get("type") == "response":
                 b = self.bodies.get(rid)
@@ -359,13 +385,14 @@ class NetInjector:
 
 async def proxy_session(front_ws, target_id, bridge_port, appid=None):
     back = await websockets.connect(f"ws://127.0.0.1:{bridge_port}",
-                                    open_timeout=3, max_size=2**22)
+                                    open_timeout=3, max_size=2**25)
     injector = None
     feeder = None
     tasks = []
     local_replies = set()
     page_requests = set()
     frontend_ready = asyncio.Event()
+    storage = None
     try:
         res = await asyncio.wait_for(
             bridge_cmd(back, "Target.attachToTarget",
@@ -374,11 +401,26 @@ async def proxy_session(front_ws, target_id, bridge_port, appid=None):
         if not session:
             await front_ws.close()
             return
+        appid = appid or appid_of_target(target_id)
+        if not appid:
+            appid = await asyncio.to_thread(appid_from_session_status, target_id)
+        if appid:
+            storage = WxStorageAdapter(appid, target_id)
+            injector = NetInjector(front_ws, appid)
+            injector.ready = False
         async def front_to_back():
             nonlocal injector, feeder, appid
             async for msg in front_ws:
                 d = json.loads(msg)
                 method = d.get("method", "")
+                if storage:
+                    reply = await storage.handle(d)
+                    if reply is not None:
+                        await front_ws.send(json.dumps(reply))
+                        if method in ("DOMStorage.enable", "DOMStorage.disable"):
+                            local_replies.add(d.get("id"))
+                        else:
+                            continue
                 # synthetic network: intercept body requests
                 rid = str((d.get("params") or {}).get("requestId", ""))
                 if (method == "Network.getResponseBody" and injector
@@ -414,6 +456,7 @@ async def proxy_session(front_ws, target_id, bridge_port, appid=None):
                     if appid and not injector:
                         injector = NetInjector(front_ws, appid)
                         injector.ready = False
+                    if injector and feeder is None:
                         async def feed_after_init():
                             try:
                                 await asyncio.wait_for(frontend_ready.wait(), 2)
@@ -453,6 +496,10 @@ async def proxy_session(front_ws, target_id, bridge_port, appid=None):
                     continue
                 if d.get("sessionId") in (session, None):
                     d.pop("sessionId", None)
+                    if storage:
+                        storage.observe(d)
+                    if injector:
+                        injector.observe(d)
                     await front_ws.send(json.dumps(d))
                     if d.get("id") in page_requests:
                         page_requests.discard(d["id"])
@@ -495,7 +542,10 @@ async def handler(ws):
     appid = parse_qs(urlsplit(ws.path).query).get("appid", [None])[0]
     if appid and not re.fullmatch(r"wx[0-9a-f]{16}", appid):
         appid = None
-    await proxy_session(ws, m.group(1), port, appid)
+    try:
+        await proxy_session(ws, m.group(1), port, appid)
+    except websockets.exceptions.ConnectionClosed as exc:
+        await ws.close(1012 if exc.code == 1012 else 1011, "debug transport disconnected")
 
 
 async def process_request(path, headers):

@@ -42,7 +42,7 @@ function fixture() {
     setTimeout(fn, delay) { timeouts.set(++nextTimer, { fn, delay }); return nextTimer; },
     clearTimeout(id) { timeouts.delete(id); },
   });
-  vm.runInContext(source, context);
+  vm.runInContext(source, context, { filename: 'rea://agent.js' });
   return { context, intervals, timeouts, sockets,
     flush() { for (const timer of intervals.values()) if (timer.delay === 250) timer.fn(); },
   };
@@ -146,4 +146,26 @@ function fixture() {
   assert.equal(f.sockets[1].sent[0].events.length, 2, 'reconnect retains queued events');
 }
 
-console.log('Agent regressions passed: delivery, retry, unique ids, reinjection, capture safety, manual reconnect.');
+{
+  const f = fixture();
+  vm.runInContext('function loadData() { wx.request({url: "https://test.invalid/stack"}); }\nloadData();',
+    f.context, { filename: 'https://usr/pages/home.js' });
+  const stack = f.context.__REA__.events[0].data.stack;
+  assert.equal(stack[0].functionName, 'loadData');
+  assert.equal(stack[0].url, 'https://usr/pages/home.js');
+  assert.equal(stack[0].lineNumber, 0);
+  assert.equal(stack[0].columnNumber, 25);
+  assert.ok(stack.every(frame => !frame.url.startsWith('rea://')));
+
+  const old = f.context.__REA__, originalRequest = f.context.wx.request.__reaOriginal;
+  old.version = 9;
+  vm.runInContext(source, f.context, { filename: 'rea://agent.js' });
+  assert.equal(f.context.__REA__.version, 10);
+  assert.equal(f.context.wx.request.__reaOriginal, originalRequest);
+  assert.equal(f.intervals.size, 3, 'upgrade disposes old route, flush and heartbeat timers');
+  f.context.wx.request({ url: 'https://test.invalid/upgraded' });
+  assert.deepEqual(Array.from(f.context.__REA__.events, e => e.type), ['request', 'response']);
+  assert.equal(old.events.length, 2, 'upgrade must not leave the previous wrapper active');
+}
+
+console.log('Agent regressions passed: delivery, retry, unique ids, reinjection, capture safety, request stacks, upgrades.');

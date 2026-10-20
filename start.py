@@ -7,6 +7,7 @@ Open http://127.0.0.1:8777/ after starting.
 Usage:
   python3 start.py    # start everything
 """
+import argparse
 import asyncio
 import json
 import os
@@ -31,11 +32,12 @@ LOGDIR = ("/Users/yangyiming/Library/Application Support/微信开发者工具/"
 SNIPER_LOCK = "/tmp/wechat_rea/sniper.lock"
 SESS_LOCK = "/tmp/wechat_rea/sess.lock"
 SESSION_PORT = 8778
-SERVICE_SCRIPTS = ("sniper.py", "cdp_gateway.py", "service_session.py")
+SERVICE_SCRIPTS = ("sniper.py", "cdp_gateway.py", "service_session.py", "wmpf_direct.py")
 MANAGER_PID_FILE = "/tmp/wechat_rea/start.pid"
 
 # --- process management ---
 _children = {}
+_manage_stop = threading.Event()
 
 
 def spawn(name, script, *args):
@@ -172,15 +174,15 @@ def cleanup_stale_services():
     # Sniper does not bind a TCP port, but its lock must be released first.
     for _ in range(40):
         leftover = set(_lsof_pids(SNIPER_LOCK, SESS_LOCK))
-        for pid in sorted(leftover):
-            if _is_orphan_service(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
         if not leftover:
             break
         time.sleep(0.1)
+    for pid in sorted(leftover):
+        if _is_orphan_service(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
 
     # Gateway must be gone before the new process can bind :9333.
     for _ in range(40):
@@ -190,6 +192,8 @@ def cleanup_stale_services():
 
 
 def find_bridge_port():
+    if os.environ.get("WECHAT_DEBUG_MODE") == "direct":
+        return 9422
     try:
         files = sorted((f for f in os.listdir(LOGDIR) if f.endswith(".log")),
                        key=lambda f: os.path.getmtime(os.path.join(LOGDIR, f)))
@@ -224,6 +228,7 @@ async def get_targets_cached():
             st = json.loads(r.read())
         data = {"bridge": st.get("bridge_port") or find_bridge_port(),
                 "bridge_state": st.get("bridge_state", "?"),
+                "debug_mode": st.get("debug_mode", "bridge"),
                 "targets": [t for t in st.get("targets", [])
                             if t.get("appid")],
                 "mps": st.get("mps", {}),
@@ -403,20 +408,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"appid": appid, "file": fname,
                             "lines": content.splitlines()})
         elif path == "/api/open_devtools":
-            from urllib.parse import parse_qs, urlsplit
+            from urllib.parse import parse_qs, urlencode, urlsplit
             qs = parse_qs(urlsplit(self.path).query)
             tid = qs.get("target_id", [""])[0]
             appid = qs.get("appid", [""])[0]
             if re.fullmatch(r"[0-9A-Fa-f]+", tid):
-                url = (f"devtools://devtools/bundled/devtools_app.html"
-                       f"?ws=127.0.0.1:{GATEWAY_PORT}/devtools/page/{tid}")
+                endpoint = f"127.0.0.1:{GATEWAY_PORT}/devtools/page/{tid}"
                 if re.fullmatch(r"wx[0-9a-f]{16}", appid):
-                    url += "?appid=" + appid
+                    endpoint += "?appid=" + appid
+                url = "devtools://devtools/bundled/devtools_app.html?" + urlencode({"ws": endpoint})
                 # 'open' cmd doesn't support devtools:// — use AppleScript
                 apple = f'tell application "Google Chrome" to open location "{url}"'
                 subprocess.Popen(["osascript", "-e", apple],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self._json({"ok": True, "url": url[:80]})
+                self._json({"ok": True, "url": url})
             else:
                 self._json({"ok": False, "error": "no target_id"})
         elif path == "/api/start_sniper":
@@ -517,11 +522,26 @@ def read_source(appid, fname):
 
 def auto_manage():
     """Background thread: keep sniper, gateway and service session running."""
-    while True:
+    while not _manage_stop.is_set():
+        if os.environ.get("WECHAT_DEBUG_MODE") == "direct":
+            spawn("direct", "services/wmpf_direct.py")
         spawn("sniper", "services/sniper.py")
         spawn("gateway", "services/cdp_gateway.py")
         spawn("sess", "services/service_session.py")
-        time.sleep(5)
+        _manage_stop.wait(5)
+
+
+def stop_children():
+    for child in _children.values():
+        if child.poll() is None:
+            child.terminate()
+    deadline = time.monotonic() + 4
+    for child in _children.values():
+        try:
+            child.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
 
 
 def main():
@@ -529,12 +549,43 @@ def main():
     stop_previous_manager()
     cleanup_stale_services()
     write_manager_pid()
-    threading.Thread(target=auto_manage, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", DASHBOARD_PORT), Handler)
-    print(f"\n  🚀 Dashboard: http://127.0.0.1:{DASHBOARD_PORT}/\n")
-    print(f"  Sniper + Gateway auto-managed\n")
-    server.serve_forever()
+    manager = threading.Thread(target=auto_manage, daemon=True)
+    def stop(*_):
+        _manage_stop.set()
+        raise KeyboardInterrupt
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, stop)
+    manager.start()
+    try:
+        print(f"\n  🚀 Dashboard: http://127.0.0.1:{DASHBOARD_PORT}/\n")
+        print(f"  Sniper + Gateway auto-managed\n")
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _manage_stop.set()
+        manager.join()
+        server.server_close()
+        stop_children()
+        try:
+            with open(MANAGER_PID_FILE, encoding="ascii") as f:
+                ours = f.read().strip() == str(os.getpid())
+            if ours:
+                os.unlink(MANAGER_PID_FILE)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("bridge", "direct"), default="bridge",
+                        help="direct: experimental mode without WeChat Developer Tools")
+    options = parser.parse_args()
+    if options.mode == "direct":
+        try:
+            from services import wmpf_direct
+        except ImportError:
+            parser.error("direct mode requires: python3 -m pip install -r requirements-direct.txt")
+    os.environ["WECHAT_DEBUG_MODE"] = options.mode
     main()

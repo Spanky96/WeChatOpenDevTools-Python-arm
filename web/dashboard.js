@@ -4,7 +4,7 @@ const { DebugStore, eventTime, bodyText, truncated, duration } = DebugModel;
 const store = new DebugStore();
 const state = { selected: null, status: { targets: [], mps: {} }, tab: 'network',
   cursor: null, since: Date.now() / 1000 - 300, netSel: null, detailTab: 'headers',
-  storage: {}, storageLoaded: new Set(), files: {}, source: null, bps: new Map(),
+  storage: {}, storageLoaded: new Set(), files: {}, source: null, bps: new Map(), pendingBps: new Set(),
   consolePaused: false, frozenConsole: [], firstSeen: new Map(), sync: '等待同步',
   settings: { request_body: 32768, response_body: 131072, headers: 16384 } };
 const phases = { discovered: '等待发现', attaching: '附加目标', waiting_context: '等待上下文',
@@ -48,6 +48,7 @@ function renderApps() {
   if (appsSignature !== html) { appsSignature = html; $('apps').innerHTML = html; icons(); }
   for (const name of ['sniper', 'gateway', 'sess']) $('service-' + name).className = 'service ' + (state.status[name] ? 'on' : 'off');
   const bridgeUp = state.status.bridge_state === 'up';
+  $('bridge-title').textContent = state.status.debug_mode === 'direct' ? '独立调试' : '调试桥';
   $('bridge-dot').className = 'dot ' + (bridgeUp ? 'on' : 'wait');
   $('bridge-port').textContent = state.status.bridge || '--';
   $('bridge-state').textContent = bridgeUp ? '已连接' : state.status.bridge_state === 'connecting' ? '连接中' : '未连接';
@@ -238,10 +239,14 @@ async function toggleBreakpoint(line) {
   if (!source) return;
   if (source.formatted) { toast('请在原始源码中设置断点'); return; }
   const key = source.file + ':' + line;
+  const pendingKey = appid + ':' + key;
+  if (state.pendingBps.has(pendingKey)) return;
+  state.pendingBps.add(pendingKey);
   if (!state.bps.has(appid)) state.bps.set(appid, new Set());
   const bps = state.bps.get(appid), removing = bps.has(key);
   try { const result = await post('/api/breakpoint', { appid, file: source.file, line, remove: removing }); if (!result.ok) throw new Error(result.error || '设置断点失败'); removing ? bps.delete(key) : bps.add(key); if (appid === state.selected) renderSource(line); }
   catch (error) { toast(error.message, true); }
+  finally { state.pendingBps.delete(pendingKey); }
 }
 async function openSourceAt(file, line) {
   switchTab('source');

@@ -74,6 +74,24 @@ class EventTests(unittest.IsolatedAsyncioTestCase):
             f.write(json.dumps({"t": timestamp, "appid": appid,
                                 "type": kind, "data": data}) + "\n")
 
+    async def test_request_initiator_uses_captured_stack_and_observed_script(self):
+        frame = {"functionName": "loadData", "url": "https://usr/pages/home.js",
+                 "lineNumber": 12, "columnNumber": 34}
+        self.append("request", {"id": "stack", "url": "https://test.invalid/", "stack": [frame]})
+        injector = gateway.NetInjector(self.front, APPID)
+        injector.observe({"method": "Debugger.scriptParsed", "params": {
+            "url": frame["url"], "scriptId": "77", "executionContextId": 3}})
+        await injector.enable("Network")
+        await injector.feed()
+        self.assertEqual(self.front.messages[0]["params"]["initiator"], {
+            "type": "script", "stack": {"callFrames": [{**frame, "scriptId": "77"}]}})
+        injector.observe({"method": "Debugger.scriptParsed", "params": {
+            "url": frame["url"], "scriptId": "88", "executionContextId": 4}})
+        self.assertEqual(injector.initiator({"stack": [frame]})["stack"]["callFrames"][0]["scriptId"], "")
+        for stack in (None, {}, "bad", [None, {"url": "x", "lineNumber": "bad"}]):
+            self.assertEqual(injector.initiator({"stack": stack}), {"type": "other"})
+        self.assertEqual(injector.initiator({}), {"type": "other"})
+
     async def test_console_first_does_not_consume_network_history(self):
         self.append("request", {"id": "one", "url": "https://test.invalid/",
                                 "method": "POST", "data": {"a": 1}})
@@ -245,7 +263,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ctx, 88)
             if expression == "typeof wx":
                 return "object"
-            return 9 if expression.endswith("globalThis.__REA__.version") else "undefined"
+            return 10 if ";globalThis.__REA__.version\n" in expression else "undefined"
         with patch.object(service, "eval_js", side_effect=evaluate), patch.object(service, "emit"):
             await service.setup_targets(br)
         self.assertEqual(service.MP[APPID]["ctx"], 88)
@@ -265,6 +283,40 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectionError):
             await asyncio.wait_for(br.cmd("Target.getTargets"), 0.5)
         self.assertEqual(br.wait, {})
+
+    async def test_direct_context_requires_matching_service_appid(self):
+        br = AsyncMock()
+        with patch.dict(os.environ, {"WECHAT_DEBUG_MODE": "direct"}), \
+                patch.object(service, "eval_js", new_callable=AsyncMock) as evaluate:
+            for returned in (False, None, "object", "true"):
+                evaluate.return_value = returned
+                self.assertFalse(await service.is_service_context(br, "session", 3, APPID))
+            evaluate.return_value = True
+            self.assertTrue(await service.is_service_context(br, "session", 3, APPID))
+            expression = evaluate.call_args.args[3]
+            self.assertIn("typeof getApp==='function'", expression)
+            self.assertIn("miniProgram.appId===" + json.dumps(APPID), expression)
+
+    async def test_breakpoint_removal_keeps_record_until_native_acknowledgement(self):
+        value = service.MP[APPID] = {"sid": "session", "bps": {"app-service.js:12": "bp-one"}}
+        br = AsyncMock()
+        request = {"path": "/breakpoint", "appid": APPID, "file": "app-service.js", "line": 12, "remove": True}
+        for response in ({"_err": "timeout"}, {"code": -32000, "message": "disconnected"}, None):
+            br.cmd.return_value = response
+            result = await service.process_ctrl(br, request)
+            self.assertFalse(result["ok"])
+            self.assertEqual(value["bps"], {"app-service.js:12": "bp-one"})
+        br.cmd.return_value = {}
+        self.assertTrue((await service.process_ctrl(br, request))["ok"])
+        self.assertEqual(value["bps"], {})
+
+    async def test_duplicate_breakpoint_setting_preserves_the_owned_id(self):
+        service.MP[APPID] = {"sid": "session", "bps": {"app-service.js:12": "bp-one"}}
+        br = AsyncMock()
+        result = await service.process_ctrl(br, {"path": "/breakpoint", "appid": APPID,
+                                                "file": "app-service.js", "line": 12})
+        self.assertEqual(result, {"ok": True, "breakpointId": "bp-one"})
+        br.cmd.assert_not_called()
 
     async def test_manual_retry_reconnects_an_injected_agent(self):
         target = {"type": "page", "targetId": TARGET,

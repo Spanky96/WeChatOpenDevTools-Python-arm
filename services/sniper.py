@@ -3,7 +3,7 @@
 main process only, plus optional remote-debug appid swapping.
 
 Swap control:
-  echo wx0000000000000005 > /tmp/wechat_rea/swap_appid   # enable swap
+  echo wx0000000000000003 > /tmp/wechat_rea/swap_appid   # enable swap
   rm /tmp/wechat_rea/swap_appid                          # disable
 
 Workflow for debugging ANY mini-program:

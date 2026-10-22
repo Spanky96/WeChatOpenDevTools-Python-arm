@@ -1,3 +1,15 @@
 frida-example
 .DS_Store
 __pycache__
+
+# 私有逆向研究笔记与日志,不随仓库公开
+docs/
+cclogs/
+# 本地调试/测试脚本,不随仓库公开
+tests/
+scripts/test_hook_v2.js
+scripts/test_hook_v413.py
+scripts/experimental_hook.js
+scripts/direct_debug_probe.js
+scripts/direct_debug_probe.py
+scripts/probe_cdp.py

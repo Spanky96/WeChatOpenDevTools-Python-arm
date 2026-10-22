@@ -165,6 +165,88 @@ if (!module) {
         }
     });
 
+    // ---- 8. render-type rewrite at the Chromium AppendSwitch source.
+    // Web/multitab renderers get --wmpf-render-type via the Chromium
+    // AppendSwitch (0x93016E0), NOT the flue builder, and it OVERWRITES the
+    // value hook #4 appended — so rewrite 0 -> 1 here to give every renderer
+    // (mini-program AND web page) debug render type: inspector on, visible to
+    // the debug bridge.
+    Interceptor.attach(base.add(0x93016E0), {
+        onEnter: function (args) {
+            try {
+                if (args[1].readCString() !== "wmpf-render-type") return;
+                var len = args[4].toInt32() - args[3].toInt32();
+                var cur = len > 0 && len < 8 ? args[3].readUtf8String(len) : "?";
+                if (len === 1 && args[3].readU8() === 0x30) {  // "0"
+                    var v = Memory.allocUtf8String("1");
+                    args[3] = v; args[4] = v.add(1);
+                    send("[sniper] chromium AppendSwitch render-type 0 -> 1");
+                } else {
+                    send("[sniper] chromium AppendSwitch render-type=" + cur +
+                         " (left as-is)");
+                }
+            } catch (e) { }
+        }
+    });
+
+    // ---- 9. posix_spawn argv rewrite: catch EVERY renderer spawn.
+    // Web/multitab renderers (render-type=7 etc.) bypass the AppendSwitch
+    // paths above — their argv is assembled elsewhere — so rewrite at the
+    // exec boundary instead: any child with --type=renderer and a
+    // non-debug wmpf-render-type becomes render type 1 (inspector on).
+    function readStrv(argv) {
+        var parts = [];
+        try {
+            for (var i = 0; i < 96; i++) {
+                var p = argv.add(i * Process.pointerSize).readPointer();
+                if (p.isNull()) break;
+                parts.push(p);
+            }
+        } catch (e) { }
+        return parts;
+    }
+    var spawnPins = [];   // keep rewritten argv alive across the spawn call
+    ["posix_spawn", "posix_spawnp"].forEach(function (fn) {
+        var addr;
+        try { addr = Module.findGlobalExportByName(fn); } catch (e) { addr = null; }
+        if (!addr) return;
+        Interceptor.attach(addr, {
+            onEnter: function (args) {
+                try {
+                    var path = args[1].readCString();
+                    if (!path || path.indexOf("WeChatAppEx") < 0) return;
+                    var parts = readStrv(args[4]);
+                    var isRenderer = false, rtIdx = -1, rtVal = null;
+                    for (var i = 0; i < parts.length; i++) {
+                        var s = parts[i].readCString();
+                        if (s === "--type=renderer") isRenderer = true;
+                        if (s !== null && s.indexOf("--wmpf-render-type=") === 0) {
+                            rtIdx = i;
+                            rtVal = s.substring(19);
+                        }
+                    }
+                    if (!isRenderer || rtIdx < 0 || rtVal !== "0") return;
+                    // type 0 = web page renderer (multitab); 6/7 are
+                    // prewarm/shell roles and must keep their own type —
+                    // rewriting those crashes the first page load.
+                    var one = Memory.allocUtf8String("--wmpf-render-type=1");
+                    var n = Memory.alloc((parts.length + 1) * Process.pointerSize);
+                    for (var j = 0; j < parts.length; j++) {
+                        n.add(j * Process.pointerSize).writePointer(
+                            j === rtIdx ? one : parts[j]);
+                    }
+                    n.add(parts.length * Process.pointerSize).writePointer(ptr(0));
+                    args[4] = n;
+                    spawnPins.push(n, one);
+                    if (spawnPins.length > 512) spawnPins.splice(0, 256);
+                    send("[sniper] spawn render-type " + rtVal + " -> 1 (" +
+                         path.split("/").pop() + ")");
+                } catch (e) { }
+            }
+        });
+        send("[+] hooked " + fn + " (argv render-type gate)");
+    });
+
     // ---- (removed) hot __params JSON-setter hook — superseded by the
     // mmcronet C-API capture daemon (net_cronet.py). Hooking the shared
     // JSON setter on every call was a hot path and risked instability.

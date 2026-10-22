@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a bounded native transport experiment; normal start.py does not use it."""
+"""Run a bounded native transport experiment; normal main.py does not use it."""
 import argparse
 import json
 from pathlib import Path

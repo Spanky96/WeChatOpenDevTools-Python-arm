@@ -651,7 +651,7 @@ async def ctrl_loop(br):
 
 
 async def legacy_file_requests(br):
-    """start.py /api/eval and /api/storage file channels."""
+    """main.py /api/eval and /api/storage file channels."""
     if not MP:
         return
     if os.path.exists(EVAL_FILE):
@@ -868,7 +868,7 @@ async def run_session(port):
 async def main():
     global _loop, _ctrl_queue
     os.makedirs("/tmp/wechat_rea", exist_ok=True)
-    # single-instance lock (start.py respawns; duplicates fight for :8778)
+    # single-instance lock (main.py respawns; duplicates fight for :8778)
     lock = open("/tmp/wechat_rea/sess.lock", "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

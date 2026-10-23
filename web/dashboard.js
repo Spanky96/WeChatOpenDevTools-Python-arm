@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 const { DebugStore, eventTime, bodyText, truncated, duration } = DebugModel;
 const store = new DebugStore();
 const state = { selected: null, status: { targets: [], mps: {} }, tab: 'network',
+  selectedH5: null,
   cursor: null, since: Date.now() / 1000 - 300, netSel: null, detailTab: 'headers',
   storage: {}, storageLoaded: new Set(), files: {}, source: null, bps: new Map(), pendingBps: new Set(),
   consolePaused: false, frozenConsole: [], firstSeen: new Map(), sync: '等待同步',
@@ -30,23 +31,55 @@ async function api(path, options = {}) {
 const post = (path, value) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
 async function copy(value) { try { await navigator.clipboard.writeText(String(value ?? '')); toast('已复制'); } catch (_) { toast('复制失败', true); } }
 function download(name, value, type = 'application/json') { const blob = new Blob([typeof value === 'string' ? value : JSON.stringify(value, null, 2)], { type }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
-function target() { return state.status.targets.find(item => item.appid === state.selected); }
-function currentStatus() { return (state.status.mps || {})[state.selected] || {}; }
+function target() { return state.status.targets.find(item => item.appid === state.selected) || (state.selectedH5?.appid === state.selected ? state.selectedH5 : null); }
+function currentStatus() { return (state.status.mps || {})[state.selected] || (state.selectedH5 ? { phase: 'offline' } : {}); }
 function phaseName(status) { return phases[status.phase] || '等待发现'; }
+function isWebTarget(item) { return item.kind === 'web' || String(item.appid || '').startsWith('web:'); }
+function isChiiTarget(item) { return item?.transport === 'chii'; }
+function targetName(item) { return isWebTarget(item) ? (item.title || '网页') : (item.appid || '小程序'); }
+function hostname(url) { try { return new URL(url).hostname; } catch (_) { return ''; } }
+function chiiUrl(item) {
+  const url = new URL(item.devtools_url);
+  const endpoint = new URL('ws://' + url.searchParams.get('ws'));
+  endpoint.pathname = '/client/' + crypto.randomUUID();
+  url.searchParams.set('ws', endpoint.host + endpoint.pathname + endpoint.search);
+  return url.href;
+}
 
 function renderApps() {
-  const targets = [...state.status.targets].filter(item => /^wx[\da-f]{16}$/.test(item.appid));
+  const targets = [...state.status.targets].filter(item => item.appid);
   for (const item of targets) if (!state.firstSeen.has(item.appid)) state.firstSeen.set(item.appid, state.firstSeen.size);
-  targets.sort((a, b) => Number(b.url.includes('/0/')) - Number(a.url.includes('/0/')) || state.firstSeen.get(a.appid) - state.firstSeen.get(b.appid));
-  if (!targets.some(item => item.appid === state.selected)) selectApp(targets[0]?.appid || null, false);
+  targets.sort((a, b) => Number(isWebTarget(a)) - Number(isWebTarget(b)) || state.firstSeen.get(a.appid) - state.firstSeen.get(b.appid));
   $('app-count').textContent = targets.length;
-  const html = targets.map(item => {
-    const status = (state.status.mps || {})[item.appid] || {};
+  if (!targets.some(item => item.appid === state.selected)) {
+    if (state.selectedH5) {
+      const replacement = targets.find(item => isChiiTarget(item) && item.url === state.selectedH5.url);
+      if (replacement) selectApp(replacement.appid, false);
+      else targets.push(state.selectedH5);
+    } else selectApp(targets[0]?.appid || null, false);
+  }
+  const liveSelection = targets.find(item => item.appid === state.selected);
+  if (isChiiTarget(liveSelection)) state.selectedH5 = liveSelection;
+  const itemHtml = item => {
+    const status = (state.status.mps || {})[item.appid] || (isChiiTarget(item) ? { phase: 'offline' } : {});
     const version = (item.url.match(/\/wx[\da-f]+\/(\d+)\//) || [])[1];
-    return `<button class="app-item${state.selected === item.appid ? ' selected' : ''}" data-app="${esc(item.appid)}" aria-pressed="${state.selected === item.appid}"><span class="app-item-top">${icon('app-window')}${version === '0' ? '真机调试' : '小程序会话'}</span><span class="app-item-sub">${esc(item.appid)}</span><span class="app-item-bottom"><b class="dot ${status.agent_online ? 'on' : status.phase === 'offline' ? 'off' : 'wait'}"></b>${phaseName(status)}<span class="app-release">版本 ${esc(version || '--')}</span></span></button>`;
-  }).join('') || '<div class="empty">暂无小程序会话</div>';
+    const web = isWebTarget(item);
+    return `<button class="app-item${state.selected === item.appid ? ' selected' : ''}" data-app="${esc(item.appid)}" aria-pressed="${state.selected === item.appid}"><span class="app-item-top">${icon(web ? 'globe-2' : 'app-window')}${web ? esc(hostname(item.url) || '网页') : version === '0' ? '真机调试' : '小程序会话'}</span><span class="app-item-sub" title="${esc(targetName(item))}">${esc(targetName(item))}</span><span class="app-item-bottom"><b class="dot ${status.agent_online ? 'on' : status.phase === 'offline' ? 'off' : 'wait'}"></b>${phaseName(status)}<span class="app-release">${web ? (isChiiTarget(item) ? 'Chii' : 'CDP') : '版本 ' + esc(version || '--')}</span></span></button>`;
+  };
+  const mini = targets.filter(item => !isWebTarget(item));
+  const web = targets.filter(isWebTarget);
+  const group = (label, rows) => rows.length ? `<div class="app-group-title">${label}<span>${rows.length}</span></div>${rows.map(itemHtml).join('')}` : '';
+  const html = group('小程序会话', mini) + (group('网页', web) || '<div class="app-group-title">网页<span>0</span></div><div class="group-state">等待页面</div>');
   if (appsSignature !== html) { appsSignature = html; $('apps').innerHTML = html; icons(); }
   for (const name of ['sniper', 'gateway', 'sess']) $('service-' + name).className = 'service ' + (state.status[name] ? 'on' : 'off');
+  const h5 = state.status.h5 || {};
+  $('service-h5').className = 'service ' + (h5.online ? 'on' : 'off');
+  $('service-h5').title = h5.online ? 'Chii ' + h5.version : h5.reason || '网页服务未启动';
+  $('h5-service-label').textContent = h5.reason || (h5.online ? `网页在线 · ${h5.targets?.length || 0}` : '网页服务未连接');
+  $('h5-service-label').title = h5.reason || '';
+  $('start-h5').hidden = !!h5.online;
+  $('start-h5').disabled = false;
+  $('start-h5').title = h5.reason || '启动网页服务';
   const bridgeUp = state.status.bridge_state === 'up';
   $('bridge-title').textContent = state.status.debug_mode === 'direct' ? '独立调试' : '调试桥';
   $('bridge-dot').className = 'dot ' + (bridgeUp ? 'on' : 'wait');
@@ -57,6 +90,8 @@ function renderApps() {
 function selectApp(appid, render = true) {
   if (appid === state.selected) return;
   state.selected = appid; state.netSel = null; state.source = null;
+  const selectedTarget = state.status.targets.find(item => item.appid === appid);
+  state.selectedH5 = isChiiTarget(selectedTarget) ? selectedTarget : null;
   state.frozenConsole = [...store.app(appid).console];
   networkSignature = consoleSignature = '';
   if (render) {
@@ -67,26 +102,47 @@ function selectApp(appid, render = true) {
 }
 function renderSession() {
   const status = currentStatus(), selected = !!state.selected;
-  $('selected-app').textContent = state.selected || '未选择小程序';
+  const selectedTarget = target();
+  const web = selectedTarget ? isWebTarget(selectedTarget) : false;
+  const chii = isChiiTarget(selectedTarget);
+  $('selected-app').textContent = selectedTarget ? targetName(selectedTarget) : '未选择调试目标';
   $('session-phase').textContent = phaseName(status) + (status.retry_in > 0 ? ` · ${Math.ceil(status.retry_in)} 秒` : '');
   $('session-phase').className = 'status-pill' + (status.agent_online ? '' : status.phase === 'offline' ? ' offline' : ' pending');
-  $('agent-version').textContent = 'Agent ' + (status.agent_version ? 'v' + status.agent_version : '--');
-  $('last-event').textContent = '最近事件 · ' + ago(status.last_event_at);
-  $('open-devtools').disabled = !target();
-  $('retry-agent').disabled = !selected || status.agent_online;
+  $('agent-version').textContent = chii ? 'Chii ' + (state.status.h5?.version || '1.15.5') : web ? '原生 CDP' : 'Agent ' + (status.agent_version ? 'v' + status.agent_version : '--');
+  $('last-event').textContent = chii ? hostname(selectedTarget.url) : '最近事件 · ' + ago(status.last_event_at);
+  $('open-devtools').disabled = !selectedTarget || (chii && !status.agent_online);
+  $('open-devtools').innerHTML = icon('external-link') + (chii ? '独立窗口' : 'DevTools');
+  $('retry-agent').innerHTML = icon('rotate-cw') + (chii ? '重连' : '重试连接');
+  $('retry-agent').disabled = !selected || (!web && status.agent_online);
+  $('settings-open').disabled = chii;
   $('repl-in').disabled = !selected;
-  const notice = status.capture_legacy?.length ? '当前会话仍使用旧捕获钩子，重新打开该小程序后，新捕获上限和截断标记才会生效。' : status.reason && !status.agent_online ? status.reason : '';
+  $('storage-tab').hidden = web;
+  $('source-tab').hidden = web;
+  if (web && ['storage', 'source'].includes(state.tab)) switchTab('network');
+  const notice = status.capture_legacy?.length ? '当前会话仍使用旧捕获钩子，重新打开该小程序后，新捕获上限和截断标记才会生效。' : status.reason && (!status.agent_online || web) ? status.reason : '';
   $('session-notice').textContent = notice;
   $('session-notice').classList.toggle('hidden', !notice);
   const paused = status.paused;
-  $('paused-bar').classList.toggle('hidden', !paused);
+  $('paused-bar').classList.toggle('hidden', chii || !paused);
   $('paused-reason').textContent = paused ? `${paused.frames?.[0]?.fn || ''} ${paused.frames?.[0]?.url || ''}:${paused.frames?.[0]?.line || ''}` : '';
   $('net-badge').textContent = store.app(state.selected).network.size;
   $('con-badge').textContent = store.app(state.selected).console.length;
-  $('footer-activity').textContent = selected ? '最近事件 ' + ts(status.last_event_at) : '无活动会话';
+  $('footer-activity').textContent = chii ? 'Chii · ' + selectedTarget.targetId : selected ? '最近事件 ' + ts(status.last_event_at) : '无活动会话';
+  document.querySelector('.tabs').hidden = chii;
+  document.querySelectorAll('.page').forEach(page => {
+    const active = !chii && page.id === 'page-' + state.tab;
+    page.classList.toggle('active', active); page.hidden = !active;
+  });
+  $('h5-workspace').hidden = !chii;
+  if (chii) renderH5(selectedTarget, status);
+  else if ($('h5-devtools').hasAttribute('src')) {
+    $('h5-devtools').removeAttribute('src'); delete $('h5-devtools').dataset.target;
+  }
+  icons();
   if (state.tab === 'diagnostics') renderDiagnostics();
 }
 function switchTab(name) {
+  if (['storage', 'source'].includes(name) && isWebTarget(target() || {})) name = 'network';
   state.tab = name;
   document.querySelectorAll('.tab').forEach(button => { const active = button.dataset.tab === name; button.classList.toggle('active', active); button.setAttribute('aria-selected', active); button.tabIndex = active ? 0 : -1; });
   document.querySelectorAll('.page').forEach(page => { const active = page.id === 'page-' + name; page.classList.toggle('active', active); page.hidden = !active; });
@@ -96,10 +152,25 @@ function switchTab(name) {
 }
 function renderActive(force = false) {
   renderSession();
+  if (isChiiTarget(target())) return;
   if (state.tab === 'network') renderNetwork(force);
   if (state.tab === 'console') renderConsole(force);
   if (state.tab === 'storage') renderStorage();
   if (state.tab === 'diagnostics') renderDiagnostics();
+}
+
+function renderH5(item, status) {
+  const frame = $('h5-devtools'), h5 = state.status.h5 || {};
+  const online = !!h5.online && !!status.agent_online;
+  frame.hidden = !online;
+  $('h5-empty').hidden = online;
+  $('h5-empty-title').textContent = h5.online ? '等待页面重新连接' : '网页服务未连接';
+  $('h5-empty-reason').textContent = h5.reason || '';
+  const connection = item.appid + ':' + h5.port + ':' + item.connection_id;
+  if (online && frame.dataset.target !== connection) {
+    frame.src = chiiUrl(item);
+    frame.dataset.target = connection;
+  }
 }
 
 function filteredRows() { return store.rows(state.selected, { query: $('net-filter').value.trim(), method: $('net-method').value, status: $('net-state').value }); }
@@ -301,7 +372,7 @@ async function poll() {
 
 $('apps').addEventListener('click', event => { const item = event.target.closest('[data-app]'); if (item) selectApp(item.dataset.app); });
 document.querySelector('.tabs').addEventListener('click', event => { const tab = event.target.closest('[data-tab]'); if (tab) switchTab(tab.dataset.tab); });
-document.querySelector('.tabs').addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const tabs = [...document.querySelectorAll('.tab')]; let index = tabs.findIndex(tab => tab.dataset.tab === state.tab); index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; switchTab(tabs[index].dataset.tab); tabs[index].focus(); });
+document.querySelector('.tabs').addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const tabs = [...document.querySelectorAll('.tab')].filter(tab => !tab.hidden); let index = tabs.findIndex(tab => tab.dataset.tab === state.tab); index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; switchTab(tabs[index].dataset.tab); tabs[index].focus(); });
 for (const name of ['net-filter', 'net-method', 'net-state']) $(name).addEventListener(name === 'net-filter' ? 'input' : 'change', () => renderNetwork(true));
 for (const name of ['con-filter', 'con-level', 'con-follow']) $(name).addEventListener(name === 'con-filter' ? 'input' : 'change', () => renderConsole(true));
 $('net-rows').addEventListener('click', event => { const row = event.target.closest('[data-request]'); if (row) { state.netSel = row.dataset.request; renderNetwork(true); } });
@@ -340,7 +411,25 @@ $('settings-close').onclick = () => $('settings-dialog').close();
 $('settings-reset').onclick = () => fillSettings({ request_body: 32768, response_body: 131072, headers: 16384 });
 $('settings-form').onsubmit = saveSettings;
 $('refresh-status').onclick = poll;
-$('retry-agent').onclick = async () => { try { await post('/api/retry', { appid: state.selected }); toast('已安排重试'); poll(); } catch (error) { toast(error.message, true); } };
-$('open-devtools').onclick = async () => { const item = target(); if (!item) return; try { await api('/api/open_devtools?' + new URLSearchParams({ target_id: item.targetId, appid: item.appid })); } catch (error) { toast(error.message, true); } };
+$('start-h5').onclick = async () => {
+  $('start-h5').disabled = true;
+  try { await post('/api/h5/start', {}); toast('网页服务启动中'); }
+  catch (error) { toast(error.message, true); }
+  finally { poll(); }
+};
+$('retry-agent').onclick = async () => {
+  if (isChiiTarget(target())) { delete $('h5-devtools').dataset.target; renderSession(); poll(); return; }
+  try { await post('/api/retry', { appid: state.selected }); toast('已安排重试'); poll(); }
+  catch (error) { toast(error.message, true); }
+};
+$('open-devtools').onclick = async () => {
+  const item = target(); if (!item) return;
+  if (isChiiTarget(item)) {
+    window.open(chiiUrl(item), '_blank', 'noopener');
+    return;
+  }
+  try { await api('/api/open_devtools?' + new URLSearchParams({ target_id: item.targetId, appid: item.appid })); }
+  catch (error) { toast(error.message, true); }
+};
 document.querySelectorAll('[data-debug]').forEach(button => { button.onclick = async () => { try { const result = await post('/api/control', { appid: state.selected, action: button.dataset.debug }); if (!result.ok) throw new Error('调试命令失败'); poll(); } catch (error) { toast(error.message, true); } }; });
 switchTab('network'); icons(); poll();

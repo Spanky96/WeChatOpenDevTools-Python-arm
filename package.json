@@ -1,0 +1,12 @@
+{
+  "name": "wechat-open-devtools-h5",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Chii transport for WeChat H5 debugging",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "chii": "1.15.5"
+  }
+}

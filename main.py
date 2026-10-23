@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""One-click WeChat mini-program DevTools launcher (unified entry).
+"""WeChat mini-program and H5 DevTools launcher with one dashboard.
 
 Detects the running WeChat build and picks the flow automatically:
   4.x (WeChatAppEx Electron)  -> sniper + direct transport (default mode,
-                                 no WeChat DevTools IDE needed) + dashboard
+                                 no WeChat DevTools IDE needed) + H5 + dashboard
   pre-4.x (3.8.x)             -> legacy address-table hook (the old flow)
 
 Auto-manages the matching daemons. Open http://127.0.0.1:8777/ after starting.
@@ -29,11 +29,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import websockets
 
 from services import wechat_detect
+from services import h5_dashboard
+from services.version_config import get_version
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, "web")
 DASHBOARD_PORT = 8777
 GATEWAY_PORT = 9333
+H5_PORT = 8780
 
 LOGDIR = ("/Users/yangyiming/Library/Application Support/微信开发者工具/"
           "d1e8765721a6c23d43b14c95b1843e6b/WeappLog/logs")
@@ -41,17 +44,19 @@ SNIPER_LOCK = "/tmp/wechat_rea/sniper.lock"
 SESS_LOCK = "/tmp/wechat_rea/sess.lock"
 SESSION_PORT = 8778
 SERVICE_SCRIPTS = ("sniper.py", "cdp_gateway.py", "service_session.py",
-                   "wmpf_direct.py", "legacy_inject.py")
+                   "wmpf_direct.py", "legacy_inject.py", "h5_debug.py")
 MANAGER_PID_FILE = "/tmp/wechat_rea/main.pid"
 
 # services per WeChat flow — the other flow's children are retired on switch
-FLOW_CHILDREN = {"new": ("sniper", "gateway", "sess", "direct"),
+FLOW_CHILDREN = {"new": ("sniper", "gateway", "sess", "direct", "h5"),
                  "legacy": ("legacy",)}
 FLOW_STATE = {"flow": "new", "version": None, "pid": None}
 
 # --- process management ---
 _children = {}
 _manage_stop = threading.Event()
+_h5_launch_lock = threading.Lock()
+_h5_retry_at = 0
 
 
 def spawn(name, script, *args):
@@ -65,6 +70,47 @@ def spawn(name, script, *args):
             cmd, stdout=logf, stderr=subprocess.STDOUT,
             cwd=ROOT, start_new_session=True)
     return True
+
+
+def ensure_h5_service(force=False):
+    global _h5_retry_at
+    with _h5_launch_lock:
+        if force:
+            h5_dashboard.launch_config.cache_clear()
+        if h5_dashboard.snapshot(H5_PORT)['online']:
+            return {'ok': True, 'started': False}
+        if not force and time.monotonic() < _h5_retry_at:
+            return {'ok': False, 'error': '网页服务等待重试'}
+        python, reason = h5_dashboard.launch_config()
+        if not python:
+            return {'ok': False, 'error': reason}
+        _h5_retry_at = time.monotonic() + 30
+        started = spawn('h5', 'services/h5_debug.py', '--port', str(H5_PORT))
+        return {'ok': True, 'started': started}
+
+
+def dashboard_status():
+    result = asyncio.run(get_targets_cached())
+    h5 = h5_dashboard.snapshot(H5_PORT)
+    _, install_reason = h5_dashboard.launch_config()
+    h5['available'] = h5['online'] or not install_reason
+    if not h5['online'] and install_reason:
+        h5['reason'] = install_reason
+    mps = dict(result.get('mps', {}))
+    for target in h5['targets']:
+        mps[target['appid']] = {'phase': 'online', 'agent_online': True, 'transport': 'chii'}
+
+    def alive(name, port=None):
+        child = _children.get(name)
+        if child:
+            return child.poll() is None and (port is None or bool(
+                _lsof_pids('-nP', f'-iTCP:{port}', '-sTCP:LISTEN')))
+        return False
+
+    return {**result, 'targets': [*result.get('targets', []), *h5['targets']], 'mps': mps,
+            'h5': h5, 'flow': FLOW_STATE['flow'], 'wechat_version': FLOW_STATE.get('version'),
+            'sniper': alive('sniper'), 'gateway': alive('gateway', GATEWAY_PORT),
+            'sess': alive('sess', SESSION_PORT), 'gateway_port': GATEWAY_PORT}
 
 
 def _lsof_pids(*args):
@@ -282,7 +328,9 @@ async def get_targets():
                             })
                         elif url.startswith("http") and "servicewechat" not in url:
                             pages.append({
-                                "appid": "H5",
+                                "appid": "web:" + str(t["targetId"]),
+                                "kind": "web",
+                                "title": t.get("title") or "网页",
                                 "url": url[:80],
                                 "targetId": t["targetId"],
                             })
@@ -305,6 +353,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        if self.path.split('?')[0] == '/api/h5/start':
+            self._json(ensure_h5_service(force=True))
+            return
         routes = {"/api/settings": "/capture_settings", "/api/retry": "/retry",
                   "/api/evaluate": "/eval", "/api/control": "/control",
                   "/api/breakpoint": "/breakpoint"}
@@ -324,25 +375,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/status":
-            result = asyncio.run(get_targets_cached())
-            sniper_alive = _children.get("sniper") and _children["sniper"].poll() is None
-            gateway_alive = (_children.get("gateway") and
-                             _children["gateway"].poll() is None and
-                             bool(_lsof_pids("-nP", "-iTCP:%d" % GATEWAY_PORT,
-                                             "-sTCP:LISTEN")))
-            sess_alive = (_children.get("sess") and
-                          _children["sess"].poll() is None and
-                          bool(_lsof_pids("-nP", "-iTCP:%d" % SESSION_PORT,
-                                          "-sTCP:LISTEN")))
-            self._json({
-                **result,
-                "flow": FLOW_STATE["flow"],
-                "wechat_version": FLOW_STATE.get("version"),
-                "sniper": bool(sniper_alive),
-                "gateway": bool(gateway_alive),
-                "sess": bool(sess_alive),
-                "gateway_port": GATEWAY_PORT,
-            })
+            self._json(dashboard_status())
         elif path == "/api/events":
             import urllib.parse
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
@@ -381,13 +414,17 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]
                                        if "?" in self.path else "")
             appid = (qs.get("appid") or [""])[0]
+            if not (re.fullmatch(r"wx[0-9a-f]{16}", appid) or
+                    re.fullmatch(r"web:[A-Za-z0-9_.:-]+", appid)):
+                self._json({"error": "invalid target"})
+                return
             files = []
             srcdir = f"/tmp/wechat_rea/src_{appid}"
             if os.path.isdir(srcdir):
                 for fn in os.listdir(srcdir):
                     if fn.endswith(".js"):
                         files.append(fn)
-            if not files:
+            if not files and not appid.startswith("web:"):
                 outdir = ensure_unpacked(appid)
                 for dirpath, _dirnames, filenames in os.walk(outdir):
                     for fn in filenames:
@@ -416,7 +453,11 @@ class Handler(BaseHTTPRequestHandler):
                                        if "?" in self.path else "")
             appid = (qs.get("appid") or [""])[0]
             fname = (qs.get("file") or ["app-service.js"])[0]
-            content = read_source(appid, fname)
+            if not (re.fullmatch(r"wx[0-9a-f]{16}", appid) or
+                    re.fullmatch(r"web:[A-Za-z0-9_.:-]+", appid)):
+                content = None
+            else:
+                content = read_source(appid, fname)
             if content is None:
                 self._json({"error": f"file not found: {fname} "
                                      f"(needs unpacked package)"})
@@ -428,10 +469,11 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(urlsplit(self.path).query)
             tid = qs.get("target_id", [""])[0]
             appid = qs.get("appid", [""])[0]
-            if re.fullmatch(r"[0-9A-Fa-f]+", tid):
+            if re.fullmatch(r"[A-Za-z0-9_.:-]+", tid):
                 endpoint = f"127.0.0.1:{GATEWAY_PORT}/devtools/page/{tid}"
-                if re.fullmatch(r"wx[0-9a-f]{16}", appid):
-                    endpoint += "?appid=" + appid
+                if re.fullmatch(r"wx[0-9a-f]{16}", appid or ""):
+                    from urllib.parse import quote
+                    endpoint += "?appid=" + quote(appid, safe="")
                 url = "devtools://devtools/bundled/devtools_app.html?" + urlencode({"ws": endpoint})
                 # 'open' cmd doesn't support devtools:// — use AppleScript
                 apple = f'tell application "Google Chrome" to open location "{url}"'
@@ -525,6 +567,8 @@ def read_source(appid, fname):
         return None
     path = runtime_src_path(appid, safe)
     if path is None:
+        if str(appid).startswith("web:"):
+            return None
         outdir = ensure_unpacked(appid)
         path = os.path.join(outdir, safe)
         if not os.path.isfile(path):
@@ -541,6 +585,7 @@ def _spawn_flow(flow):
     if flow == "legacy":
         spawn("legacy", "services/legacy_inject.py")
         return
+    ensure_h5_service()
     if os.environ.get("WECHAT_DEBUG_MODE") == "direct":
         spawn("direct", "services/wmpf_direct.py")
     spawn("sniper", "services/sniper.py")
@@ -609,24 +654,22 @@ def _pretty_wechat_version(version_id, cmdline=""):
         if m and m.group(2).lower() == version_id:
             return m.group(1)
     try:
-        with open(os.path.join(ROOT, "configs",
-                               f"address_{version_id}_arm.json")) as f:
-            return json.load(f).get("version") or version_id
+        return get_version(version_id).get("version") or version_id
     except (OSError, ValueError):
         return version_id or "?"
 
 
 def wait_for_wechat():
-    """等微信启动：没检测到 WeChatAppEx 就提示用户先开微信，每 2 秒重试。"""
+    """Wait for the desktop app; AppEx may be spawned only after navigation."""
     detect = wechat_detect.detect_flow()
-    if detect["pid"]:
+    if detect["pid"] or wechat_detect.find_wechat_main()[0]:
         return detect
-    print("[-] 未检测到微信进程。请先启动微信（并登录），本工具每 2 秒自动重试；"
+    print("[-] 未检测到微信。请先启动微信（并登录），本工具每 2 秒自动重试；"
           "Ctrl+C 退出。")
     while True:
         time.sleep(2)
         detect = wechat_detect.detect_flow()
-        if detect["pid"]:
+        if detect["pid"] or wechat_detect.find_wechat_main()[0]:
             return detect
 
 
@@ -682,8 +725,8 @@ def run_dashboard(detect):
     os.makedirs(WEB_DIR, exist_ok=True)
     stop_previous_manager()
     cleanup_stale_services()
-    write_manager_pid()
     server = ThreadingHTTPServer(("127.0.0.1", DASHBOARD_PORT), Handler)
+    write_manager_pid()
     manager = threading.Thread(target=auto_manage, daemon=True)
     def stop(*_):
         _manage_stop.set()
@@ -692,8 +735,8 @@ def run_dashboard(detect):
         signal.signal(sig, stop)
     manager.start()
     try:
-        print(f"\n  🚀 Dashboard: http://127.0.0.1:{DASHBOARD_PORT}/\n")
-        print(f"  Sniper + Gateway auto-managed\n")
+        print(f"\n  Dashboard: http://127.0.0.1:{DASHBOARD_PORT}/\n")
+        print("  小程序 + 网页服务自动托管\n")
         server.serve_forever()
     except KeyboardInterrupt:
         pass
@@ -722,17 +765,20 @@ def _direct_available():
 def _resolve_mode(parser, requested):
     if requested == "direct" and not _direct_available():
         parser.error("direct 模式需要: "
-                     "python3 -m pip install -r requirements-direct.txt")
+                     "python3 -m pip install -r requirements.txt")
     if requested is None:
         requested = "direct" if _direct_available() else "bridge"
         if requested == "bridge":
-            print("[提示] direct 依赖缺失 (requirements-direct.txt)，"
+            print("[提示] direct 依赖缺失 (requirements.txt)，"
                   "回落 bridge 模式")
     return requested
 
 
 def main(argv=None):
+    global H5_PORT
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--web-port", type=int, default=8780,
+                        help="网页 Chii 服务端口（默认 8780）")
     parser.add_argument("--mode", choices=("direct", "bridge"), default=None,
                         help="仅 4.x 生效：direct（默认，无需微信开发者工具）/"
                              "bridge（真机调试桥）")
@@ -742,6 +788,9 @@ def main(argv=None):
     parser.add_argument("--version", metavar="ID",
                         help="配合 -p 使用：指定老版配置标识（如 13080712）")
     options = parser.parse_args(argv)
+    if not 1024 <= options.web_port <= 65535 or options.web_port in (8777, 8778, 9333, 9422):
+        parser.error("--web-port 必须为 1024..65535，且不能占用其他调试服务端口")
+    H5_PORT = options.web_port
     os.environ["WECHAT_DEBUG_MODE"] = _resolve_mode(parser, options.mode)
 
     if options.pid:

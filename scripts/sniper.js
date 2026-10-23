@@ -54,9 +54,9 @@ if (!module) {
     });
 
     // ---- 2. chrome-inspector + render-type switches
-    // HasSwitch("wmpf-render-type")==true at 0x29E992C makes the spawner
-    // assign debug render type 1 to EVERY renderer -> inspector on -> the
-    // remote-debug bridge can see and debug ANY mini-program.
+    // These switches affect renderer startup, but render-type=1 alone does
+    // not publish a CDP target. Mini-program debugging still depends on its
+    // native bridge; webpage target discovery has not been verified.
     // enable-chrome-inspector additionally makes the spawner pass
     // --remote-debugging-port=62168 to a special child (fixed WeChat port,
     // discovered 2026-10-18 at 0x540de64 / 0x540e75c).
@@ -111,8 +111,8 @@ if (!module) {
     var INSPECT_SWITCHES = ["xweb-enable-inspect", "enable-vconsole",
                              "auto-launch-devtools",
                              "export-wxpkg-content", "use-debug-wxpkg"];
-    // render-type=1 registers the renderer with the debug bridge; appending
-    // the same switch key overwrites WeChat's default 0 (Chromium switch map)
+    // Preserve the existing mini-program debug setup. This does not establish
+    // that multitab web pages register with or appear in the debug bridge.
     var RENDER_TYPE_OVERRIDE = "1";
     Interceptor.attach(base.add(0x525721C), {
         onEnter: function (args) { this.builder = args[1]; },
@@ -148,8 +148,9 @@ if (!module) {
 
 
     // ---- 7. rewrite render-type VALUE as the builder writes it.
-    // WeChat appends wmpf-render-type=0 for ordinary renderers; flipping the
-    // value here makes every renderer start as debug type (inspector on).
+    // WeChat appends wmpf-render-type=0 for ordinary renderers. Rewriting it
+    // changes renderer startup mode; it does not prove an inspector endpoint
+    // or browser-level target is created.
     Interceptor.attach(base.add(0x1928DB4), {   // flue AppendSwitch (value form)
         onEnter: function (args) {
             try {
@@ -168,9 +169,9 @@ if (!module) {
     // ---- 8. render-type rewrite at the Chromium AppendSwitch source.
     // Web/multitab renderers get --wmpf-render-type via the Chromium
     // AppendSwitch (0x93016E0), NOT the flue builder, and it OVERWRITES the
-    // value hook #4 appended — so rewrite 0 -> 1 here to give every renderer
-    // (mini-program AND web page) debug render type: inspector on, visible to
-    // the debug bridge.
+    // value hook #4 appended. Keep the experimental 0 -> 1 rewrite, while
+    // treating it only as a renderer-mode change until a real web target is
+    // observed through Target.getTargets.
     Interceptor.attach(base.add(0x93016E0), {
         onEnter: function (args) {
             try {
@@ -193,7 +194,8 @@ if (!module) {
     // Web/multitab renderers (render-type=7 etc.) bypass the AppendSwitch
     // paths above — their argv is assembled elsewhere — so rewrite at the
     // exec boundary instead: any child with --type=renderer and a
-    // non-debug wmpf-render-type becomes render type 1 (inspector on).
+    // render-type=0 becomes 1. This is not evidence that CDP discovery or
+    // attach works for the resulting webpage renderer.
     function readStrv(argv) {
         var parts = [];
         try {
@@ -225,7 +227,8 @@ if (!module) {
                             rtVal = s.substring(19);
                         }
                     }
-                    if (!isRenderer || rtIdx < 0 || rtVal !== "0") return;
+                    if (!isRenderer || rtIdx < 0) return;
+                    if (rtVal !== "0") return;
                     // type 0 = web page renderer (multitab); 6/7 are
                     // prewarm/shell roles and must keep their own type —
                     // rewriting those crashes the first page load.

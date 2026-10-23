@@ -1,4 +1,0 @@
-# Only needed for the optional WMPF transport experiment.
-websockets>=11,<12
-protobuf>=5,<7
-frida>=16,<17

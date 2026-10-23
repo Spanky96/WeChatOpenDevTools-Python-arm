@@ -12,12 +12,10 @@ Version identifiers come from the WeChatAppEx main-process command line:
 On 4.x both signals agree (client_version int == UA hex). On pre-4.x they
 may not, so resolution prefers whichever signal matches a known config id.
 """
-import os
 import re
 import subprocess
 
-# 4.1.13 Electron build: switch-based, served by the new stack (sniper.js)
-SWITCH_BASED_IDS = {"f2641d62"}
+from services.version_config import load_versions
 
 
 def _ps_output():
@@ -39,6 +37,20 @@ def find_wechatappex(ps_text=None):
         if "MacOS/WeChatAppEx" not in cmd or "--type=" in cmd or "crashpad" in cmd:
             continue
         return pid, cmd
+    return None, None
+
+
+def find_wechat_main(ps_text=None):
+    """Return the desktop WeChat process when its AppEx child is idle."""
+    text = ps_text if ps_text is not None else _ps_output()
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid, cmd = int(parts[0]), parts[1]
+        if ("/Applications/WeChat.app/Contents/MacOS/WeChat" in cmd and
+                "WeChatHelper" not in cmd and "crashpad" not in cmd):
+            return pid, cmd
     return None, None
 
 
@@ -82,7 +94,7 @@ def extract_version_id(cmd, known_ids=frozenset()):
 
 def all_known_ids(configs_dir=None):
     """Every config id, including switch-based builds served by the new stack."""
-    return legacy_version_ids(configs_dir) | SWITCH_BASED_IDS
+    return set(load_versions(configs_dir))
 
 
 def legacy_version_ids(configs_dir=None):
@@ -90,14 +102,8 @@ def legacy_version_ids(configs_dir=None):
 
     Switch-based builds (4.1.13) have a config but belong to the new stack.
     """
-    configs_dir = configs_dir or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs")
-    try:
-        names = os.listdir(configs_dir)
-    except OSError:
-        return set()
-    return ({name.split("_")[1] for name in names
-             if name.startswith("address_")} - SWITCH_BASED_IDS)
+    return {version for version, profile in load_versions(configs_dir).items()
+            if profile.get("flow") == "legacy"}
 
 
 def detect_flow(ps_text=None, configs_dir=None):

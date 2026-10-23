@@ -44,6 +44,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CTRL_PORT = 8778
 
 MP = {}            # appid -> {sid, ctx, scripts, paused, topFrame, bps, fails}
+SESSION_APPS = {}  # sessionId -> appid, available before Runtime.enable completes
 TARGETS_CACHE = []
 ONLINE = {}        # appid -> last heartbeat/event ts (agent hub, no bridge)
 HUB_VERSION = {}   # appid -> newest injected agent generation
@@ -158,6 +159,10 @@ class Br:
     def _runtime_event(self, message):
         method, sid = message.get("method"), message.get("sessionId")
         params = message.get("params") or {}
+        web_appid = SESSION_APPS.get(sid) or next((a for a, v in MP.items()
+                          if v.get("kind") == "web" and v.get("sid") == sid), None)
+        if web_appid:
+            self._emit_web_event(web_appid, method, params)
         if method == "Runtime.executionContextCreated":
             context = params.get("context") or {}
             if context.get("id") is not None:
@@ -182,6 +187,7 @@ class Br:
                 WAKE.set()
         elif method == "Target.detachedFromTarget":
             detached = params.get("sessionId")
+            SESSION_APPS.pop(detached, None)
             self.contexts.pop(detached, None)
             for retry in FAILED_CTX.values():
                 if retry.get("sid") == detached:
@@ -193,6 +199,52 @@ class Br:
             if WAKE:
                 WAKE.set()
 
+    @staticmethod
+    def _remote_value(value):
+        if not isinstance(value, dict):
+            return value
+        if "value" in value:
+            return value["value"]
+        if "description" in value:
+            return value["description"]
+        return value.get("type", "")
+
+    @classmethod
+    def _emit_web_event(cls, appid, method, params):
+        """Persist native web CDP events in the same bounded event stream."""
+        now = time.time()
+        if method == "Runtime.consoleAPICalled":
+            args = [cls._remote_value(arg) for arg in params.get("args", [])[:16]]
+            emit({"t": now, "appid": appid, "type": "console",
+                  "data": {"level": params.get("type", "log"), "args": args}})
+        elif method == "Runtime.exceptionThrown":
+            details = params.get("exceptionDetails") or {}
+            exception = details.get("exception") or {}
+            message = (exception.get("description") or exception.get("value") or
+                       details.get("text") or "Uncaught exception")
+            location = details.get("url")
+            if details.get("lineNumber") is not None:
+                location = f"{location or ''}:{details['lineNumber'] + 1}"
+            emit({"t": now, "appid": appid, "type": "console",
+                  "data": {"level": "error", "args": [message],
+                           "location": location}})
+        elif method == "Network.requestWillBeSent":
+            request = params.get("request") or {}
+            emit({"t": now, "appid": appid, "type": "request",
+                  "data": {"id": params.get("requestId"), "url": request.get("url", ""),
+                           "method": request.get("method", "GET"),
+                           "header": request.get("headers") or {},
+                           "data": request.get("postData")}})
+        elif method == "Network.responseReceived":
+            response = params.get("response") or {}
+            emit({"t": now, "appid": appid, "type": "response",
+                  "data": {"id": params.get("requestId"), "url": response.get("url", ""),
+                           "status": response.get("status"),
+                           "header": response.get("headers") or {}}})
+        elif method == "Network.loadingFailed":
+            emit({"t": now, "appid": appid, "type": "fail",
+                  "data": {"id": params.get("requestId"),
+                           "err": params.get("errorText", "network request failed")}})
     async def _on_event(self, m):
         sid = m.get("sessionId")
         appid = next((a for a, v in MP.items() if v["sid"] == sid), None)
@@ -261,6 +313,10 @@ async def eval_js(br, sid, ctx, expr, timeout=8):
 
 
 async def is_service_context(br, sid, context_id, appid):
+    # A web page has no mini-program `wx` service API. Its first runtime
+    # context is still a valid CDP target for evaluate and debugger calls.
+    if str(appid).startswith("web:"):
+        return True
     if os.environ.get("WECHAT_DEBUG_MODE") != "direct":
         return await eval_js(br, sid, context_id, "typeof wx", timeout=3) == "object"
     expression = ("(function(){try{return typeof wx==='object' && typeof getApp==='function' && "
@@ -294,11 +350,13 @@ def app_status(appid, target_id=None):
     value = MP.get(appid, {})
     diag = DIAGNOSTICS.get(appid, {})
     retry = FAILED_CTX.get(target_id, {})
-    online = ONLINE.get(appid, 0) > now - 30
+    is_web = str(appid).startswith("web:")
+    online = (is_web and bool(value)) or ONLINE.get(appid, 0) > now - 30
     phase = "online" if online else diag.get("phase", "discovered")
     if value and not online:
         phase = "connecting" if now - diag.get("since", now) < 15 else "offline"
     return {**diag, "phase": phase, "agent_online": online,
+            "kind": "web" if is_web else "mini",
             "context_id": value.get("ctx"),
             "agent_version": HUB_VERSION.get(appid) or value.get("agent_version"),
             "last_event_at": LAST_EVENT.get(appid), "heartbeat_at": ONLINE.get(appid),
@@ -309,6 +367,21 @@ def app_status(appid, target_id=None):
             "paused": value.get("paused"), "bps": list(value.get("bps", {}))}
 
 
+def target_key(target):
+    """Return the dashboard/session key for a target without guessing H5 appids."""
+    match = re.search(r"(wx[0-9a-f]{16})", target.get("url", ""))
+    return match.group(1) if match else "web:" + str(target.get("targetId", ""))
+
+
+def target_descriptor(target):
+    key = target_key(target)
+    is_web = key.startswith("web:")
+    return {"appid": key, "kind": "web" if is_web else "mini",
+            "title": target.get("title") or ("网页" if is_web else key),
+            "url": target.get("url", "")[:240],
+            "targetId": target.get("targetId")}
+
+
 async def setup_targets(br):
     r = await br.cmd("Target.getTargets", timeout=6)
     if not isinstance(r, dict) or "_err" in r or "targetInfos" not in r:
@@ -316,30 +389,38 @@ async def setup_targets(br):
     global TARGETS_CACHE
     TARGETS_CACHE = r.get("targetInfos", [])
     pages = [t for t in TARGETS_CACHE
-             if t["type"] == "page" and "servicewechat.com/wx" in
-             t.get("url", "")]
+             if t.get("type") == "page" and t.get("url", "").startswith("http")]
     seen = set()
     for t in pages:
         am = re.search(r"(wx[0-9a-f]{16})", t.get("url", ""))
-        appid = am.group(1) if am else "?"
+        appid = am.group(1) if am else "web:" + str(t.get("targetId", ""))
+        is_web = not bool(am)
         seen.add(appid)
         if appid in MP:
             if MP[appid].get("targetId") == t["targetId"]:
                 value = MP[appid]
                 if not value.pop("reconnect_requested", False):
                     continue
-                connected = await eval_js(
-                    br, value["sid"], value["ctx"],
-                    "(function(){if(typeof __REA__==='object' && __REA__.reconnect){"
-                    "__REA__.reconnect();return true}return false})()", timeout=4)
-                if connected:
-                    DIAGNOSTICS[appid] = {"phase": "connecting", "since": time.time()}
-                    continue
-                MP.pop(appid, None)
-                FAILED_CTX[t["targetId"]] = {"sid": value["sid"], "next_retry": 0,
-                                             "attempts": 0}
+                if is_web:
+                    MP.pop(appid, None)
+                    SESSION_APPS.pop(value["sid"], None)
+                    await br.cmd("Target.detachFromTarget",
+                                 sessionId=value["sid"], timeout=2)
+                    FAILED_CTX.pop(t["targetId"], None)
+                else:
+                    connected = await eval_js(
+                        br, value["sid"], value["ctx"],
+                        "(function(){if(typeof __REA__==='object' && __REA__.reconnect){"
+                        "__REA__.reconnect();return true}return false})()", timeout=4)
+                    if connected:
+                        DIAGNOSTICS[appid] = {"phase": "connecting", "since": time.time()}
+                        continue
+                    MP.pop(appid, None)
+                    FAILED_CTX[t["targetId"]] = {"sid": value["sid"], "next_retry": 0,
+                                                 "attempts": 0}
             else:
                 previous = MP.pop(appid)
+                SESSION_APPS.pop(previous["sid"], None)
                 await br.cmd("Target.detachFromTarget", sessionId=previous["sid"], timeout=2)
         retry = FAILED_CTX.get(t["targetId"], {})
         if time.time() < retry.get("next_retry", 0):
@@ -353,6 +434,10 @@ async def setup_targets(br):
         if not sid:
             retry_later(appid, t["targetId"], None, "无法附加目标")
             continue
+        if is_web:
+            SESSION_APPS[sid] = appid
+        else:
+            SESSION_APPS.pop(sid, None)
         DIAGNOSTICS[appid] = {"phase": "waiting_context", "since": time.time()}
         svc = None
         invalid_session = False
@@ -380,9 +465,32 @@ async def setup_targets(br):
             if svc is not None:
                 break
         if svc is None:
-            print(f"[sess] {appid}: no service ctx", flush=True)
+            if invalid_session:
+                SESSION_APPS.pop(sid, None)
+            print(f"[sess] {appid}: no runtime ctx", flush=True)
             retry_later(appid, t["targetId"], None if invalid_session else sid,
-                        "附加会话已失效" if invalid_session else "等待 service 上下文")
+                        "附加会话已失效" if invalid_session else "等待 runtime 上下文")
+            continue
+        if is_web:
+            MP[appid] = {"appid": appid, "kind": "web", "sid": sid,
+                         "ctx": svc, "targetId": t["targetId"], "scripts": {},
+                         "paused": None, "topFrame": None, "bps": {}, "fails": 0,
+                         "dbg": False, "agent_version": None, "capture_legacy": [],
+                         "title": t.get("title") or "网页", "url": t.get("url", "")}
+            FAILED_CTX.pop(t["targetId"], None)
+            network = await br.cmd("Network.enable", sid, timeout=5)
+            network_error = None
+            if isinstance(network, dict) and any(
+                    key in network for key in ("_err", "code", "error")):
+                network_error = str(network.get("message") or
+                                     network.get("_err") or
+                                     network.get("error") or network)
+            DIAGNOSTICS[appid] = {"phase": "online", "since": time.time(),
+                                  **({"reason": "Network unavailable: " + network_error}
+                                     if network_error else {})}
+            emit({"t": time.time(), "appid": appid, "type": "attached",
+                  "data": {"debugger": False, "kind": "web"}})
+            print(f"[sess] web target attached -> {appid}", flush=True)
             continue
         # Re-evaluate the agent (idempotent: its IIFE early-returns
         # if present). Page reloads after bridge restarts create fresh
@@ -415,12 +523,14 @@ async def setup_targets(br):
     for a in [a for a in MP if a not in seen]:
         print(f"[sess] {a} gone", flush=True)
         previous = MP.pop(a)
+        SESSION_APPS.pop(previous["sid"], None)
         await br.cmd("Target.detachFromTarget", sessionId=previous["sid"], timeout=2)
     active_ids = {t["targetId"] for t in pages}
     for target_id in list(FAILED_CTX):
         if target_id not in active_ids:
             sid = FAILED_CTX.pop(target_id).get("sid")
             if sid:
+                SESSION_APPS.pop(sid, None)
                 await br.cmd("Target.detachFromTarget", sessionId=sid, timeout=2)
 
 
@@ -731,20 +841,16 @@ class CtrlHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] == "/status":
+            page_targets = [t for t in TARGETS_CACHE if t.get("type") == "page"
+                            and t.get("url", "").startswith("http")]
+            descriptors = [target_descriptor(t) for t in page_targets]
             self._json({"bridge_state": BRIDGE["state"],
                         "bridge_port": BRIDGE["port"],
                         "debug_mode": os.environ.get("WECHAT_DEBUG_MODE", "bridge"),
                         "targetInfos": list(TARGETS_CACHE),
-                        "targets": [{"appid": (re.search(r"(wx[0-9a-f]{16})", t.get("url", "")) or [None, None])[1],
-                                     "url": t.get("url", "")[:90],
-                                     "targetId": t.get("targetId")}
-                                    for t in TARGETS_CACHE
-                                    if t.get("type") == "page" and
-                                    "servicewechat.com/wx" in t.get("url", "")],
-                        "mps": {a: app_status(a, t.get("targetId"))
-                                for t in list(TARGETS_CACHE)
-                                for a in [(re.search(r"(wx[0-9a-f]{16})", t.get("url", "")) or [None, None])[1]]
-                                if a and t.get("type") == "page"},
+                        "targets": descriptors,
+                        "mps": {d["appid"]: app_status(d["appid"], d["targetId"])
+                                for d in descriptors},
                         "capture_settings": load_config()})
         else:
             self._json({})
@@ -753,12 +859,13 @@ class CtrlHandler(BaseHTTPRequestHandler):
 async def local_control(req):
     if req["path"] == "/retry":
         appid = req.get("appid")
-        if not re.fullmatch(r"wx[0-9a-f]{16}", appid or ""):
-            return {"error": "无效 appid"}
+        if not (re.fullmatch(r"wx[0-9a-f]{16}", appid or "") or
+                re.fullmatch(r"web:[A-Za-z0-9_.:-]+", appid or "")):
+            return {"error": "无效 target"}
         if appid in MP:
             MP[appid]["reconnect_requested"] = True
         for target in TARGETS_CACHE:
-            if appid in target.get("url", ""):
+            if target_key(target) == appid:
                 retry = FAILED_CTX.get(target.get("targetId"))
                 if retry:
                     retry["next_retry"] = 0
@@ -849,6 +956,8 @@ async def run_session(port):
                     continue
                 last_poll = time.monotonic()
                 for appid in list(MP):
+                    if MP[appid].get("kind") == "web":
+                        continue
                     if ONLINE.get(appid, 0) > time.time() - 30:
                         continue
                     ok = await poll_agent(br, appid)
@@ -861,6 +970,7 @@ async def run_session(port):
             # Session ids belong to this bridge WebSocket. Never carry stale
             # ids into the next connection, or reinjection is suppressed.
             MP.clear()
+            SESSION_APPS.clear()
             TARGETS_CACHE.clear()
             FAILED_CTX.clear()
 

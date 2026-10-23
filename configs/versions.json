@@ -1,0 +1,78 @@
+{
+  "versions": {
+    "13080712": {
+      "flow": "legacy",
+      "DevToolStringAddr": "0x6C219F8",
+      "WechatWebStringAddr": "0x7258F58",
+      "JsonGetBoolFunc": "0x25F4E3C"
+    },
+    "13080812": {
+      "flow": "legacy",
+      "xwebadress": "0x23F09D8",
+      "DevToolStringAddr": "0x6C219F8",
+      "WechatWebStringAddr": "0x7258E58",
+      "JsonGetBoolFunc": "0x25F4E6C"
+    },
+    "13080813": {
+      "flow": "legacy",
+      "xwebadress": "0x23F07F4",
+      "DevToolStringAddr": "0x6C218F8",
+      "WechatWebStringAddr": "0x7258D58",
+      "JsonGetBoolFunc": "0x25F4C88"
+    },
+    "13080911": {
+      "flow": "legacy",
+      "xwebadress": "0x23F07F4",
+      "DevToolStringAddr": "0x6C218F8",
+      "WechatWebStringAddr": "0x7258D58",
+      "JsonGetBoolFunc": "0x25F4C88"
+    },
+    "13080a11": {
+      "flow": "legacy",
+      "xwebadress": "0x23F07F4",
+      "DevToolStringAddr": "0x6C218F8",
+      "WechatWebStringAddr": "0x7258D58",
+      "JsonGetBoolFunc": "0x25F4C88"
+    },
+    "f2641d62": {
+      "flow": "new",
+      "version": "4.1.13.98",
+      "appex_version": "2.5.6.25561",
+      "client_version_hex": "f2641d62",
+      "notes": "Electron-based WeChatAppEx (flue). Debug switches propagated via CommandLine.",
+      "HasSwitchFunc": "0x8C2730",
+      "JsonGetBoolFunc": "0xF1ADB8",
+      "AppendSwitchFunc": "0x93016E0",
+      "GetMutableCmdlineFunc": "0x525FAF0",
+      "debug_switches": [
+        "enable-chrome-inspector",
+        "enable-ui-devtools",
+        "enable-vconsole",
+        "auto-launch-devtools",
+        "xweb-enable-inspect",
+        "use-debug-wxpkg",
+        "export-wxpkg-content"
+      ],
+      "json_bool_keys": ["enable_vconsole", "global_enable_vconsole", "is_game_debug"],
+      "legacy_replacements": {
+        "DevToolStringAddr": "removed - switch-based now (auto-launch-devtools)",
+        "WechatWebStringAddr": "removed - applet-debug.com URL deleted in 4.1.13",
+        "xwebadress": "replaced by xweb-enable-inspect switch"
+      },
+      "h5": {
+        "wechat_version": "4.1.13.98",
+        "client_version": "4066647394",
+        "architecture": "arm64",
+        "framework": "WeChatAppEx Framework",
+        "arm64_sha256": "dd8760e8e75e560725923508ac8e57b999c8d9e87036f215c69df3a12e1e6f88",
+        "frame_vtable": "0xb14bca8",
+        "core_frame_vtable": "0xb148300",
+        "dom_window_vtable": "0xb1479f8",
+        "execute_script": "0x7a10360",
+        "execute_slot": "0x178",
+        "pointer_cage_mask": "0xb5da980",
+        "execute_fingerprint": "ff c3 00 d1 f4 4f 01 a9 fd 7b 02 a9 fd 83 00 91"
+      }
+    }
+  }
+}

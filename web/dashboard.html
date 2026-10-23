@@ -18,13 +18,15 @@
       <span class="service" id="service-sniper" title="Sniper"><b class="dot"></b>Sniper</span>
       <span class="service" id="service-gateway" title="Gateway"><b class="dot"></b>Gateway</span>
       <span class="service" id="service-sess" title="Service"><b class="dot"></b>Service</span>
+      <span class="service" id="service-h5" title="网页调试"><b class="dot"></b>H5</span>
     </div>
     <button class="icon-btn" id="settings-open" aria-label="捕获设置" data-tip="捕获设置"><i data-lucide="sliders-horizontal"></i></button>
   </header>
   <div class="app-layout">
     <aside class="sidebar">
-      <div class="sidebar-heading"><span>小程序会话</span><span id="app-count" class="pill">0</span><button class="icon-btn small" id="refresh-status" aria-label="刷新状态" data-tip="刷新状态"><i data-lucide="refresh-cw"></i></button></div>
+      <div class="sidebar-heading"><span>调试目标</span><span id="app-count" class="pill">0</span><button class="icon-btn small" id="refresh-status" aria-label="刷新状态" data-tip="刷新状态"><i data-lucide="refresh-cw"></i></button></div>
       <div class="app-list" id="apps"><div class="empty">正在读取会话</div></div>
+      <div class="h5-service-status"><i data-lucide="globe-2"></i><span id="h5-service-label">网页服务连接中</span><button class="icon-btn small" id="start-h5" aria-label="启动网页服务" data-tip="启动网页服务"><i data-lucide="play"></i></button></div>
       <div class="bridge-status"><div><b class="dot" id="bridge-dot"></b><strong id="bridge-title">调试桥</strong><span class="mono" id="bridge-port">--</span></div><span id="bridge-state">连接中</span><span id="sync-status">等待同步</span></div>
     </aside>
     <main class="workspace">
@@ -34,11 +36,15 @@
       </section>
       <div class="notice hidden" id="session-notice" role="status"></div>
       <div class="paused hidden" id="paused-bar"><i data-lucide="pause"></i><strong>已暂停</strong><span id="paused-reason"></span><div class="debug-actions"><button class="icon-btn" data-debug="resume" aria-label="继续" data-tip="继续"><i data-lucide="play"></i></button><button class="icon-btn" data-debug="stepOver" aria-label="步过" data-tip="步过"><i data-lucide="corner-down-right"></i></button><button class="icon-btn" data-debug="stepInto" aria-label="步入" data-tip="步入"><i data-lucide="arrow-down-to-line"></i></button><button class="icon-btn" data-debug="stepOut" aria-label="步出" data-tip="步出"><i data-lucide="arrow-up-from-line"></i></button></div></div>
+      <section class="h5-workspace" id="h5-workspace" aria-label="网页 DevTools" hidden>
+        <div class="empty" id="h5-empty" role="status"><i data-lucide="unplug"></i><strong id="h5-empty-title">等待页面重新连接</strong><span id="h5-empty-reason"></span></div>
+        <iframe id="h5-devtools" title="网页 Elements、Console 与 Network" allow="clipboard-write" hidden></iframe>
+      </section>
       <nav class="tabs" role="tablist" aria-label="调试视图">
         <button class="tab active" data-tab="network" role="tab" aria-selected="true"><i data-lucide="network"></i>Network<span id="net-badge" class="tab-count">0</span></button>
         <button class="tab" data-tab="console" role="tab" aria-selected="false"><i data-lucide="terminal"></i>Console<span id="con-badge" class="tab-count">0</span></button>
-        <button class="tab" data-tab="storage" role="tab" aria-selected="false"><i data-lucide="database"></i>Storage</button>
-        <button class="tab" data-tab="source" role="tab" aria-selected="false"><i data-lucide="file-code-2"></i>源码</button>
+        <button class="tab" id="storage-tab" data-tab="storage" role="tab" aria-selected="false"><i data-lucide="database"></i>Storage</button>
+        <button class="tab" id="source-tab" data-tab="source" role="tab" aria-selected="false"><i data-lucide="file-code-2"></i>源码</button>
         <button class="tab" data-tab="diagnostics" role="tab" aria-selected="false"><i data-lucide="activity"></i>连接诊断</button>
       </nav>
       <section class="page active" id="page-network" role="tabpanel" aria-label="Network">

@@ -2,14 +2,12 @@
 """Legacy daemon: address-table devtools hook for pre-4.x WeChat (3.8.x).
 
 main.py spawns this instead of the sniper stack when the detected WeChat
-build has an address_*_arm.json config. Same injection as the original
-main.py flow — "var address=<address_<id>_arm.json>" + scripts/hook.js —
-but re-arms automatically after WeChat restarts.
-
-One-shot attach (old `main.py -p`): python3 services/legacy_inject.py -p 123
+build has a legacy profile in configs/versions.json. Loads scripts/hook.js
+and re-arms automatically after WeChat restarts. Managed by main.py.
 """
 import argparse
 import fcntl
+import json
 import os
 import signal
 import sys
@@ -22,14 +20,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from services import wechat_detect
+from services.version_config import get_version
 
 LOCK = "/tmp/wechat_rea/legacy.lock"
 
 
 def build_hookcode(version):
-    with open(os.path.join(ROOT, "configs",
-                           f"address_{version}_arm.json")) as f:
-        addresses = f.read()
+    profile = get_version(version)
+    if profile.get("flow") != "legacy":
+        raise ValueError(f"Not a legacy WeChat version: {version}")
+    addresses = json.dumps(profile)
     with open(os.path.join(ROOT, "scripts", "hook.js"),
               encoding="utf-8") as f:
         hookcode = f.read()
@@ -115,7 +115,8 @@ def main():
         except Exception as exc:
             print(f"[legacy] loop: {exc}", flush=True)
         stopped.wait(1)
-    detach(armed)
+    if armed:
+        detach(armed)
 
 
 if __name__ == "__main__":

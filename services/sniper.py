@@ -57,6 +57,34 @@ def direct_runtime_connected():
         return False
 
 
+def wait_for_framework(session, timeout=20):
+    """Wait in-process until the version-pinned Framework image is resident."""
+    ready = threading.Event()
+    source = r"""
+        (function () {
+            var deadline = Date.now() + %d;
+            var timer = setInterval(function () {
+                if (Process.findModuleByName('WeChatAppEx Framework')) {
+                    clearInterval(timer); send('ready');
+                } else if (Date.now() >= deadline) {
+                    clearInterval(timer); send('timeout');
+                }
+            }, 100);
+        })();
+    """ % int(timeout * 1000)
+    try:
+        probe = session.create_script(source)
+        probe.on("message", lambda message, _data:
+                 ready.set() if message.get("payload") == "ready" else None)
+        probe.load()
+        ok = ready.wait(timeout + 1)
+        probe.unload()
+        return ok
+    except (frida.InvalidOperationError, frida.ProcessNotRespondingError,
+            frida.ServerNotRunningError, frida.TransportError):
+        return False
+
+
 def main():
     # single-instance lock: multiple snipers double-hook and crash WeChatAppEx
     os.makedirs("/tmp/wechat_rea", exist_ok=True)
@@ -70,7 +98,7 @@ def main():
     code = open(HOOK).read()
     direct_code = None
     if os.environ.get("WECHAT_DEBUG_MODE") == "direct":
-        with open(os.path.join(ROOT, "scripts", "direct_debug_probe.js")) as source:
+        with open(os.path.join(ROOT, "scripts", "direct_transport.js")) as source:
             direct_code = source.read()
     stopped = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -103,6 +131,12 @@ def main():
                 s = None
                 try:
                     s = frida.attach(pid)
+                    # The browser process can be visible for several seconds
+                    # before the Framework image arrives. Keep the session
+                    # quiet during that window and retry without touching the
+                    # process with stale offsets.
+                    if not wait_for_framework(s):
+                        raise RuntimeError("Framework not loaded yet")
                     detached = threading.Event()
                     s.on("detached", lambda *_, event=detached: event.set())
                     script = s.create_script(code)

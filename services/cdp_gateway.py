@@ -81,25 +81,38 @@ bridge_cmd.n = 0
 
 async def refresh_targets(bridge_port):
     global TARGET_CACHE
+    targets = []
+    try:
+        async with websockets.connect(f"ws://127.0.0.1:{bridge_port}",
+                                      open_timeout=2, max_size=2**22) as ws:
+            res = await asyncio.wait_for(bridge_cmd(ws, "Target.getTargets"), 3)
+            targets = res.get("targetInfos", [])
+    except Exception:
+        targets = []
+
+    if targets:
+        TARGET_CACHE = targets
+        return
+
     try:
         import urllib.request
         def status_targets():
             with urllib.request.urlopen("http://127.0.0.1:8778/status",
                                         timeout=1) as r:
                 status = json.loads(r.read())
+            if status.get("bridge_state") in ("dead", "stopped", "disconnected"):
+                return []
+            try:
+                if int(status.get("bridge_port")) != int(bridge_port):
+                    return []
+            except (TypeError, ValueError):
+                return []
             return status.get("targetInfos", status.get("targets", []))
         targets = await asyncio.to_thread(status_targets)
-        TARGET_CACHE = [{"type": "page", **t} for t in targets]
-        return
     except Exception:
-        pass
-    try:
-        async with websockets.connect(f"ws://127.0.0.1:{bridge_port}",
-                                      open_timeout=2, max_size=2**22) as ws:
-            res = await asyncio.wait_for(bridge_cmd(ws, "Target.getTargets"), 3)
-            TARGET_CACHE = res.get("targetInfos", [])
-    except Exception:
-        pass
+        targets = []
+
+    TARGET_CACHE = [{"type": "page", **target} for target in targets]
 
 
 def discovery_payload():
@@ -128,7 +141,7 @@ def appid_of_target(target_id):
     for t in TARGET_CACHE:
         if t.get("targetId") == target_id:
             m = re.search(r"(wx[0-9a-f]{16})", t.get("url", ""))
-            return m.group(1) if m else None
+            return m.group(1) if m else "web:" + str(target_id)
     return None
 
 
@@ -404,7 +417,7 @@ async def proxy_session(front_ws, target_id, bridge_port, appid=None):
         appid = appid or appid_of_target(target_id)
         if not appid:
             appid = await asyncio.to_thread(appid_from_session_status, target_id)
-        if appid:
+        if appid and not str(appid).startswith("web:"):
             storage = WxStorageAdapter(appid, target_id)
             injector = NetInjector(front_ws, appid)
             injector.ready = False
@@ -531,7 +544,7 @@ async def proxy_session(front_ws, target_id, bridge_port, appid=None):
 
 async def handler(ws):
     from urllib.parse import parse_qs, urlsplit
-    m = re.match(r"/devtools/page/([0-9A-F]+)", ws.path)
+    m = re.match(r"/devtools/page/([A-Za-z0-9_.:-]+)", ws.path)
     if not m:
         await ws.close()
         return
@@ -540,7 +553,8 @@ async def handler(ws):
         await ws.close()
         return
     appid = parse_qs(urlsplit(ws.path).query).get("appid", [None])[0]
-    if appid and not re.fullmatch(r"wx[0-9a-f]{16}", appid):
+    if appid and not (re.fullmatch(r"wx[0-9a-f]{16}", appid) or
+                      re.fullmatch(r"web:[A-Za-z0-9_.:-]+", appid)):
         appid = None
     try:
         await proxy_session(ws, m.group(1), port, appid)

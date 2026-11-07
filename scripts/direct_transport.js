@@ -11,8 +11,12 @@
         // 1000 is the multitab / in-WeChat web page scene. It uses the same
         // renderer pool as mini-programs but has no appid. Without allowing
         // it through the native debug gate, render-type=1 opens no CDP link.
-        1000, 1005, 1007, 1008, 1027, 1035, 1053, 1074, 1145, 1178, 1256,
-        1260, 1302, 1308
+        // 1012 is the recognize-QR-from-image entry (识别图片二维码打开小程序,
+        // verified 2026-11-07 via gate probe log). Missing scenes show up as
+        // gate events with changed:false — capture the scene value there and
+        // add it here.
+        1000, 1005, 1007, 1008, 1012, 1027, 1035, 1053, 1074, 1145, 1178,
+        1256, 1260, 1302, 1308
     ]);
     let enabled = false;
     let forceLoad = false;
